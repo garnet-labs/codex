@@ -1837,6 +1837,10 @@ impl App {
                     call_id: params.item_id.clone(),
                     reason: params.reason.clone(),
                     permissions: params.permissions.clone().into(),
+                    permissions_profile_persistence: params
+                        .permissions_profile_persistence
+                        .clone()
+                        .map(Into::into),
                 }),
             ),
             _ => None,
@@ -8615,6 +8619,7 @@ guardian_approval = true
                         write: Some(vec![test_absolute_path("/tmp/write")]),
                     }),
                 },
+                permissions_profile_persistence: None,
             },
         };
 

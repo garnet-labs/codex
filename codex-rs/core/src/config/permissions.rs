@@ -11,12 +11,17 @@ use codex_config::permissions_toml::PermissionsToml;
 use codex_network_proxy::NetworkProxyConfig;
 #[cfg(test)]
 use codex_network_proxy::NetworkUnixSocketPermission as ProxyNetworkUnixSocketPermission;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::permissions::NetworkSandboxPolicy;
+use codex_protocol::request_permissions::PermissionProfilePersistence;
 use codex_utils_absolute_path::AbsolutePathBuf;
+
+use crate::config::Config;
+use crate::config::deserialize_config_toml_with_base;
 
 pub(crate) fn network_proxy_config_from_profile_network(
     network: Option<&NetworkToml>,
@@ -25,6 +30,26 @@ pub(crate) fn network_proxy_config_from_profile_network(
         NetworkProxyConfig::default,
         NetworkToml::to_network_proxy_config,
     )
+}
+
+pub(crate) fn persistence_target_for_permissions(
+    config: &Config,
+    permissions: &PermissionProfile,
+) -> Option<PermissionProfilePersistence> {
+    if !is_supported_filesystem_only_request(permissions) {
+        return None;
+    }
+
+    // TODO: honor inherited default permission profiles instead of only the raw user layer.
+    let user_layer = config.config_layer_stack.get_user_layer()?;
+    let user_config =
+        deserialize_config_toml_with_base(user_layer.config.clone(), &config.codex_home).ok()?;
+    let profile_name = user_config.default_permissions?;
+    let permissions = user_config.permissions?;
+    permissions
+        .entries
+        .contains_key(profile_name.as_str())
+        .then_some(PermissionProfilePersistence { profile_name })
 }
 
 pub(crate) fn resolve_permission_profile<'a>(
@@ -113,6 +138,27 @@ fn compile_network_sandbox_policy(network: Option<&NetworkToml>) -> NetworkSandb
         Some(true) => NetworkSandboxPolicy::Enabled,
         _ => NetworkSandboxPolicy::Restricted,
     }
+}
+
+fn is_supported_filesystem_only_request(permissions: &PermissionProfile) -> bool {
+    let Some(file_system) = permissions.file_system.as_ref() else {
+        return false;
+    };
+
+    if file_system.is_empty() {
+        return false;
+    }
+
+    if permissions
+        .network
+        .as_ref()
+        .and_then(|network| network.enabled)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+
+    true
 }
 
 fn compile_filesystem_permission(
