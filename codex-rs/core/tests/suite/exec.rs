@@ -36,6 +36,7 @@ async fn run_test_cmd(tmp: TempDir, cmd: Vec<&str>) -> Result<ExecToolCallOutput
     let params = ExecParams {
         command: cmd.iter().map(ToString::to_string).collect(),
         cwd: tmp.path().to_path_buf(),
+        stdin: None,
         expiration: 1000.into(),
         capture_policy: ExecCapturePolicy::ShellTool,
         env: HashMap::new(),
