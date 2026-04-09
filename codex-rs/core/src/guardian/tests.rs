@@ -123,6 +123,31 @@ async fn seed_guardian_parent_history(session: &Arc<Session>, turn: &Arc<TurnCon
         .await;
 }
 
+fn run_guardian_async_test_on_large_stack<Fut>(
+    test_name: &'static str,
+    test: impl FnOnce() -> Fut + Send + 'static,
+) -> anyhow::Result<()>
+where
+    Fut: std::future::Future<Output = anyhow::Result<()>> + 'static,
+{
+    // The guardian review path composes enough async state to overflow the
+    // default Rust test-thread stack before it reaches the assertions.
+    let handle = std::thread::Builder::new()
+        .name(test_name.to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(Box::pin(test()))
+        })?;
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 fn guardian_snapshot_options() -> ContextSnapshotOptions {
     ContextSnapshotOptions::default()
         .strip_capability_instructions()
@@ -764,8 +789,16 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> anyhow::Result<()> {
+#[test]
+fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> anyhow::Result<()> {
+    run_guardian_async_test_on_large_stack(
+        "guardian_review_surfaces_responses_api_errors_in_rejection_reason",
+        guardian_review_surfaces_responses_api_errors_in_rejection_reason_inner,
+    )
+}
+
+async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason_inner()
+-> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -867,24 +900,10 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
 
 #[test]
 fn guardian_parallel_reviews_fork_from_last_committed_trunk_history() -> anyhow::Result<()> {
-    // The guardian review path composes enough async state to overflow the
-    // default Rust test-thread stack before it reaches the assertions.
-    let handle = std::thread::Builder::new()
-        .name("guardian_parallel_reviews_test".to_string())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            runtime.block_on(Box::pin(
-                guardian_parallel_reviews_fork_from_last_committed_trunk_history_inner(),
-            ))
-        })?;
-
-    match handle.join() {
-        Ok(result) => result,
-        Err(payload) => std::panic::resume_unwind(payload),
-    }
+    run_guardian_async_test_on_large_stack(
+        "guardian_parallel_reviews_fork_from_last_committed_trunk_history",
+        guardian_parallel_reviews_fork_from_last_committed_trunk_history_inner,
+    )
 }
 
 async fn guardian_parallel_reviews_fork_from_last_committed_trunk_history_inner()
