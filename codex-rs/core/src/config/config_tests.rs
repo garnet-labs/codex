@@ -36,6 +36,8 @@ use codex_config::types::ModelAvailabilityNuxConfig;
 use codex_config::types::NotificationMethod;
 use codex_config::types::Notifications;
 use codex_config::types::SandboxWorkspaceWrite;
+use codex_config::types::SessionTitlesConfig;
+use codex_config::types::SessionTitlesToml;
 use codex_config::types::SkillsConfig;
 use codex_config::types::ToolSuggestDiscoverableType;
 use codex_config::types::Tui;
@@ -157,6 +159,35 @@ persistence = "none"
             max_bytes: None,
         }),
         history_no_persistence_cfg.history
+    );
+
+    let session_titles = r#"
+[session_titles]
+enabled = false
+model = "gpt-5.4-mini"
+"#;
+    let session_titles_cfg =
+        toml::from_str::<ConfigToml>(session_titles).expect("TOML deserialization should succeed");
+    assert_eq!(
+        Some(SessionTitlesToml {
+            enabled: Some(false),
+            model: Some("gpt-5.4-mini".to_string()),
+        }),
+        session_titles_cfg.session_titles
+    );
+
+    let config = Config::load_from_base_config_with_overrides(
+        session_titles_cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").path().to_path_buf(),
+    )
+    .expect("load config from session title settings");
+    assert_eq!(
+        config.session_titles,
+        SessionTitlesConfig {
+            enabled: false,
+            model: Some("gpt-5.4-mini".to_string()),
+        }
     );
 
     let memories = r#"
@@ -4472,6 +4503,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
             agent_roles: BTreeMap::new(),
             memories: MemoriesConfig::default(),
+            session_titles: SessionTitlesConfig::default(),
             agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
             codex_home: fixture.codex_home(),
             sqlite_home: fixture.codex_home(),
@@ -4617,6 +4649,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
+        session_titles: SessionTitlesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home(),
@@ -4760,6 +4793,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
+        session_titles: SessionTitlesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home(),
@@ -4889,6 +4923,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
         agent_roles: BTreeMap::new(),
         memories: MemoriesConfig::default(),
+        session_titles: SessionTitlesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         codex_home: fixture.codex_home(),
         sqlite_home: fixture.codex_home(),
