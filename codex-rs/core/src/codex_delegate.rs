@@ -94,6 +94,9 @@ pub(crate) async fn run_codex_thread_interactive(
         inherited_shell_snapshot: None,
         user_shell_override: None,
         inherited_exec_policy: Some(Arc::clone(&parent_session.services.exec_policy)),
+        inherited_thread_state: crate::codex::InheritedThreadState {
+            prompt_cache_key: Some(parent_session.prompt_cache_key()),
+        },
         parent_trace: None,
     })
     .await?;

@@ -651,6 +651,10 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .await
         .expect("child thread should be registered");
     assert_ne!(child_thread_id, parent_thread_id);
+    assert_eq!(
+        child_thread.codex.session.prompt_cache_key(),
+        parent_thread.codex.session.prompt_cache_key(),
+    );
     let history = child_thread.codex.session.clone_history().await;
     let expected_history = [
         ResponseItem::Message {
