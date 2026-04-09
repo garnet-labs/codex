@@ -655,6 +655,10 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         child_thread.codex.session.prompt_cache_key(),
         parent_thread.codex.session.prompt_cache_key(),
     );
+    assert!(Arc::ptr_eq(
+        &child_thread.codex.session.services.mcp_connection_manager,
+        &parent_thread.codex.session.services.mcp_connection_manager,
+    ));
     let history = child_thread.codex.session.clone_history().await;
     let expected_history = [
         ResponseItem::Message {

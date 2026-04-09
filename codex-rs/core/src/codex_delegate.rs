@@ -96,6 +96,9 @@ pub(crate) async fn run_codex_thread_interactive(
         inherited_exec_policy: Some(Arc::clone(&parent_session.services.exec_policy)),
         inherited_thread_state: crate::codex::InheritedThreadState {
             prompt_cache_key: Some(parent_session.prompt_cache_key()),
+            mcp_connection_manager: Some(Arc::clone(
+                &parent_session.services.mcp_connection_manager,
+            )),
         },
         parent_trace: None,
     })

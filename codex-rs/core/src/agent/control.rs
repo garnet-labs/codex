@@ -1079,17 +1079,15 @@ impl AgentControl {
             return InheritedThreadState::default();
         };
 
-        let Some(prompt_cache_key) = state
-            .get_thread(*parent_thread_id)
-            .await
-            .ok()
-            .map(|parent_thread| parent_thread.codex.session.prompt_cache_key())
-        else {
+        let Some(parent_thread) = state.get_thread(*parent_thread_id).await.ok() else {
             return InheritedThreadState::default();
         };
 
         InheritedThreadState {
-            prompt_cache_key: Some(prompt_cache_key),
+            prompt_cache_key: Some(parent_thread.codex.session.prompt_cache_key()),
+            mcp_connection_manager: Some(Arc::clone(
+                &parent_thread.codex.session.services.mcp_connection_manager,
+            )),
         }
     }
 
