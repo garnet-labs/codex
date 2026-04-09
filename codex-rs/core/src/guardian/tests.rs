@@ -865,8 +865,30 @@ async fn guardian_review_surfaces_responses_api_errors_in_rejection_reason() -> 
     Ok(())
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn guardian_parallel_reviews_fork_from_last_committed_trunk_history() -> anyhow::Result<()> {
+#[test]
+fn guardian_parallel_reviews_fork_from_last_committed_trunk_history() -> anyhow::Result<()> {
+    // The guardian review path composes enough async state to overflow the
+    // default Rust test-thread stack before it reaches the assertions.
+    let handle = std::thread::Builder::new()
+        .name("guardian_parallel_reviews_test".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(Box::pin(
+                guardian_parallel_reviews_fork_from_last_committed_trunk_history_inner(),
+            ))
+        })?;
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+async fn guardian_parallel_reviews_fork_from_last_committed_trunk_history_inner()
+-> anyhow::Result<()> {
     let first_assessment = serde_json::json!({
         "risk_level": "low",
         "user_authorization": "high",
