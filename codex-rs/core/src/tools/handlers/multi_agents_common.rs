@@ -225,13 +225,26 @@ fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallE
     let mut config = (*base_config).clone();
     config.model = Some(turn.model_info.slug.clone());
     config.model_provider = turn.provider.clone();
-    config.model_reasoning_effort = turn.reasoning_effort;
+    config.model_reasoning_effort = turn
+        .reasoning_effort
+        .or(turn.model_info.default_reasoning_level);
     config.model_reasoning_summary = Some(turn.reasoning_summary);
     config.developer_instructions = turn.developer_instructions.clone();
     config.compact_prompt = turn.compact_prompt.clone();
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
     Ok(config)
+}
+
+pub(crate) fn restore_parent_model_config(config: &mut Config, turn: &TurnContext) {
+    config.model = Some(turn.model_info.slug.clone());
+    config.model_provider_id = turn.config.model_provider_id.clone();
+    config.model_provider = turn.provider.clone();
+    config.model_reasoning_effort = turn
+        .reasoning_effort
+        .or(turn.model_info.default_reasoning_level);
+    config.model_reasoning_summary = Some(turn.reasoning_summary);
+    config.service_tier = turn.config.service_tier;
 }
 
 /// Copies runtime-only turn state onto a child config before it is handed to `AgentControl`.
