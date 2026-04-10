@@ -1098,6 +1098,23 @@ async fn renamed_thread_footer_title_snapshot() {
 }
 
 #[tokio::test]
+async fn thread_title_status_item_stays_in_left_status_line() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+    chat.thread_name = Some("Roadmap cleanup".to_string());
+
+    let (left_line, right_line) = chat.status_line_lines_for_items(&[
+        crate::bottom_pane::StatusLineItem::ModelName,
+        crate::bottom_pane::StatusLineItem::ThreadTitle,
+    ]);
+
+    assert_eq!(
+        left_line,
+        Some(Line::from("gpt-5.3-codex · Roadmap cleanup"))
+    );
+    assert_eq!(right_line, None);
+}
+
+#[tokio::test]
 async fn renamed_thread_footer_title_plan_mode_override_snapshot() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

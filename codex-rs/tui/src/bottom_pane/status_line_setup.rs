@@ -350,6 +350,33 @@ mod tests {
     }
 
     #[test]
+    fn preview_includes_thread_title_in_left_sequence() {
+        let preview_data = StatusLinePreviewData::from_iter([
+            (StatusLineItem::ModelName, "gpt-5".to_string()),
+            (StatusLineItem::ThreadTitle, "Roadmap cleanup".to_string()),
+        ]);
+        let items = vec![
+            MultiSelectItem {
+                id: StatusLineItem::ModelName.to_string(),
+                name: String::new(),
+                description: None,
+                enabled: true,
+            },
+            MultiSelectItem {
+                id: StatusLineItem::ThreadTitle.to_string(),
+                name: String::new(),
+                description: None,
+                enabled: true,
+            },
+        ];
+
+        assert_eq!(
+            preview_data.line_for_items(&items),
+            Some(Line::from("gpt-5 · Roadmap cleanup"))
+        );
+    }
+
+    #[test]
     fn setup_view_snapshot_uses_runtime_preview_values() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let view = StatusLineSetupView::new(

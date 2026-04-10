@@ -144,30 +144,26 @@ impl ChatWidget {
             return;
         }
 
-        let mut parts = Vec::new();
-        let mut right_line = None;
-        for item in &selections.status_line_items {
-            match item {
-                StatusLineItem::ThreadTitle => {
-                    if let Some(value) = self.status_line_value_for_item(item) {
-                        right_line = Some(Line::from(value));
-                    }
-                }
-                _ => {
-                    if let Some(value) = self.status_line_value_for_item(item) {
-                        parts.push(value);
-                    }
-                }
+        let (left_line, right_line) =
+            self.status_line_lines_for_items(&selections.status_line_items);
+        self.set_status_line(left_line);
+        self.bottom_pane.set_status_line_right(right_line);
+    }
+
+    pub(super) fn status_line_lines_for_items(
+        &mut self,
+        items: &[StatusLineItem],
+    ) -> (Option<Line<'static>>, Option<Line<'static>>) {
+        let mut left_parts = Vec::new();
+
+        for item in items {
+            if let Some(value) = self.status_line_value_for_item(item) {
+                left_parts.push(value);
             }
         }
 
-        let line = if parts.is_empty() {
-            None
-        } else {
-            Some(Line::from(parts.join(" · ")))
-        };
-        self.set_status_line(line);
-        self.bottom_pane.set_status_line_right(right_line);
+        let left_line = (!left_parts.is_empty()).then(|| Line::from(left_parts.join(" · ")));
+        (left_line, None)
     }
 
     /// Clears the terminal title Codex most recently wrote, if any.
