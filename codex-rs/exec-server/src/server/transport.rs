@@ -4,6 +4,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 use tracing::warn;
 
+use crate::ExecServerRuntimePaths;
 use crate::connection::JsonRpcConnection;
 use crate::server::processor::run_connection;
 
@@ -48,28 +49,34 @@ pub(crate) fn parse_listen_url(
 
 pub(crate) async fn run_transport(
     listen_url: &str,
+    runtime_paths: ExecServerRuntimePaths,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let bind_address = parse_listen_url(listen_url)?;
-    run_websocket_listener(bind_address).await
+    run_websocket_listener(bind_address, runtime_paths).await
 }
 
 async fn run_websocket_listener(
     bind_address: SocketAddr,
+    runtime_paths: ExecServerRuntimePaths,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(bind_address).await?;
     let local_addr = listener.local_addr()?;
-    tracing::info!("codex-exec-server listening on ws://{local_addr}");
+    tracing::info!("codex exec-server listening on ws://{local_addr}");
     println!("ws://{local_addr}");
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        let runtime_paths = runtime_paths.clone();
         tokio::spawn(async move {
             match accept_async(stream).await {
                 Ok(websocket) => {
-                    run_connection(JsonRpcConnection::from_websocket(
-                        websocket,
-                        format!("exec-server websocket {peer_addr}"),
-                    ))
+                    run_connection(
+                        JsonRpcConnection::from_websocket(
+                            websocket,
+                            format!("exec-server websocket {peer_addr}"),
+                        ),
+                        runtime_paths,
+                    )
                     .await;
                 }
                 Err(err) => {

@@ -1,5 +1,6 @@
 use codex_app_server_protocol::JSONRPCErrorError;
 
+use crate::ExecServerRuntimePaths;
 use crate::protocol::ExecParams;
 use crate::protocol::ExecResponse;
 use crate::protocol::FsCopyParams;
@@ -34,10 +35,13 @@ pub(crate) struct ExecServerHandler {
 }
 
 impl ExecServerHandler {
-    pub(crate) fn new(notifications: RpcNotificationSender) -> Self {
+    pub(crate) fn new(
+        notifications: RpcNotificationSender,
+        runtime_paths: ExecServerRuntimePaths,
+    ) -> Self {
         Self {
             process: ProcessHandler::new(notifications),
-            file_system: FileSystemHandler::default(),
+            file_system: FileSystemHandler::new(runtime_paths),
         }
     }
 
