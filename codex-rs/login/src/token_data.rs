@@ -5,10 +5,7 @@ use codex_protocol::auth::PlanType;
 use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use std::collections::BTreeMap;
 use thiserror::Error;
-
-const CHATGPT_ACCOUNT_ROUTING_COOKIE_ALLOWLIST: &[&str] = &["_account_is_fedramp"];
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
 pub struct TokenData {
@@ -39,8 +36,8 @@ pub struct IdTokenInfo {
     pub chatgpt_user_id: Option<String>,
     /// Organization/workspace identifier associated with the token, if present.
     pub chatgpt_account_id: Option<String>,
-    /// AuthAPI-minted cookies that route ChatGPT backend-api requests for the selected workspace.
-    pub chatgpt_account_routing_cookies: BTreeMap<String, String>,
+    /// Whether the selected ChatGPT workspace must route through the FedRAMP edge.
+    pub chatgpt_account_is_fedramp: bool,
     pub raw_jwt: String,
 }
 
@@ -66,11 +63,8 @@ impl IdTokenInfo {
         )
     }
 
-    pub fn chatgpt_account_routing_cookies(&self) -> Vec<(String, String)> {
-        self.chatgpt_account_routing_cookies
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect()
+    pub fn is_fedramp_account(&self) -> bool {
+        self.chatgpt_account_is_fedramp
     }
 }
 
@@ -101,7 +95,7 @@ struct AuthClaims {
     #[serde(default)]
     chatgpt_account_id: Option<String>,
     #[serde(default)]
-    chatgpt_account_routing_cookies: BTreeMap<String, String>,
+    chatgpt_account_is_fedramp: bool,
 }
 
 #[derive(Deserialize)]
@@ -147,44 +141,23 @@ pub fn parse_chatgpt_jwt_claims(jwt: &str) -> Result<IdTokenInfo, IdTokenInfoErr
         .or_else(|| claims.profile.and_then(|profile| profile.email));
 
     match claims.auth {
-        Some(auth) => {
-            let chatgpt_account_routing_cookies =
-                filter_chatgpt_account_routing_cookies(auth.chatgpt_account_routing_cookies);
-            Ok(IdTokenInfo {
-                email,
-                raw_jwt: jwt.to_string(),
-                chatgpt_plan_type: auth.chatgpt_plan_type,
-                chatgpt_user_id: auth.chatgpt_user_id.or(auth.user_id),
-                chatgpt_account_id: auth.chatgpt_account_id,
-                chatgpt_account_routing_cookies,
-            })
-        }
+        Some(auth) => Ok(IdTokenInfo {
+            email,
+            raw_jwt: jwt.to_string(),
+            chatgpt_plan_type: auth.chatgpt_plan_type,
+            chatgpt_user_id: auth.chatgpt_user_id.or(auth.user_id),
+            chatgpt_account_id: auth.chatgpt_account_id,
+            chatgpt_account_is_fedramp: auth.chatgpt_account_is_fedramp,
+        }),
         None => Ok(IdTokenInfo {
             email,
             raw_jwt: jwt.to_string(),
             chatgpt_plan_type: None,
             chatgpt_user_id: None,
             chatgpt_account_id: None,
-            chatgpt_account_routing_cookies: BTreeMap::new(),
+            chatgpt_account_is_fedramp: false,
         }),
     }
-}
-
-fn filter_chatgpt_account_routing_cookies(
-    routing_cookies: BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    routing_cookies
-        .into_iter()
-        .filter(|(name, value)| is_allowed_chatgpt_account_routing_cookie(name, value))
-        .collect()
-}
-
-fn is_allowed_chatgpt_account_routing_cookie(name: &str, value: &str) -> bool {
-    CHATGPT_ACCOUNT_ROUTING_COOKIE_ALLOWLIST.contains(&name)
-        && !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| !matches!(byte, 0..=31 | 127 | b';' | b','))
 }
 
 fn deserialize_id_token<'de, D>(deserializer: D) -> Result<IdTokenInfo, D::Error>

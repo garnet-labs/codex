@@ -291,11 +291,10 @@ impl CodexAuth {
         self.get_current_token_data().and_then(|t| t.account_id)
     }
 
-    /// Returns an empty list if `is_chatgpt_auth()` is false or the token omits routing cookies.
-    pub fn chatgpt_account_routing_cookies(&self) -> Vec<(String, String)> {
+    /// Returns false if `is_chatgpt_auth()` is false or the token omits the FedRAMP claim.
+    pub fn is_fedramp_account(&self) -> bool {
         self.get_current_token_data()
-            .map(|t| t.id_token.chatgpt_account_routing_cookies())
-            .unwrap_or_default()
+            .is_some_and(|t| t.id_token.is_fedramp_account())
     }
 
     /// Returns `None` if `is_chatgpt_auth()` is false.

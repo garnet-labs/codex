@@ -136,7 +136,7 @@ fn core_auth_provider_reports_when_auth_header_will_attach() {
     let auth = CoreAuthProvider {
         token: Some("access-token".to_string()),
         account_id: None,
-        chatgpt_account_routing_cookies: Vec::new(),
+        is_fedramp_account: false,
     };
 
     assert!(auth.auth_header_attached());

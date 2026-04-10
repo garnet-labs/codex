@@ -11,7 +11,7 @@ pub fn auth_provider_from_auth(
         return Ok(CoreAuthProvider {
             token: Some(api_key),
             account_id: None,
-            chatgpt_account_routing_cookies: Vec::new(),
+            is_fedramp_account: false,
         });
     }
 
@@ -19,7 +19,7 @@ pub fn auth_provider_from_auth(
         return Ok(CoreAuthProvider {
             token: Some(token),
             account_id: None,
-            chatgpt_account_routing_cookies: Vec::new(),
+            is_fedramp_account: false,
         });
     }
 
@@ -28,13 +28,13 @@ pub fn auth_provider_from_auth(
         Ok(CoreAuthProvider {
             token: Some(token),
             account_id: auth.get_account_id(),
-            chatgpt_account_routing_cookies: auth.chatgpt_account_routing_cookies(),
+            is_fedramp_account: auth.is_fedramp_account(),
         })
     } else {
         Ok(CoreAuthProvider {
             token: None,
             account_id: None,
-            chatgpt_account_routing_cookies: Vec::new(),
+            is_fedramp_account: false,
         })
     }
 }
