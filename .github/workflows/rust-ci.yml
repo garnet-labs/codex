@@ -74,6 +74,16 @@ jobs:
         with:
           api_token: ${{ secrets.GARNET_API_TOKEN }}
           jibril_version: v2.15.0
+      - name: Diagnose Garnet sensor startup
+        if: always()
+        shell: bash
+        run: |
+          uname -a
+          if ! systemctl is-active --quiet jibril.service; then
+            echo "::warning::Jibril is not active; printing service diagnostics"
+            sudo systemctl status jibril.service --no-pager || true
+            sudo journalctl -u jibril.service --no-pager -n 200 || true
+          fi
       - uses: ./.github/actions/setup-ci
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
