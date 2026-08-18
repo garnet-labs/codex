@@ -83,6 +83,12 @@ jobs:
             echo "::warning::Jibril is not active; printing service diagnostics"
             sudo systemctl status jibril.service --no-pager || true
             sudo journalctl -u jibril.service --no-pager -n 200 || true
+            for log in /var/log/jibril.err /var/log/jibril.out /var/log/jibril.log; do
+              if sudo test -f "$log"; then
+                echo "===== $log ====="
+                sudo tail -n 300 "$log" || true
+              fi
+            done
           fi
       - uses: ./.github/actions/setup-ci
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
