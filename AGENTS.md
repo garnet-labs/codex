@@ -84,6 +84,34 @@ Likewise, when reviewing code, do not hesitate to push back on PRs that would un
 
 ## Code Review Rules
 
+### Garnet runtime evidence
+
+This repository instruments CI jobs with Garnet Runtime Review, which records
+what the workflow actually executed (process chains and outbound network
+destinations) at the kernel and diffs it against the base commit's recording.
+
+- If the PR branch contains `.garnet/runtime-evidence.md`, read it before
+  finalizing the review. It is a head-SHA-bound execution diff for this PR's
+  instrumented CI jobs, plus a machine-readable summary.
+- Reconcile the execution diff with the static diff:
+  - For dependency bumps, state explicitly whether the recorded run shows any
+    new outbound destination or process chain rooted in build/test tooling
+    (cargo, rustc, build scripts, test binaries). If none, state that the
+    runtime evidence supports the bump as behaviorally inert in the recorded
+    CI job, and cite `.garnet/runtime-evidence.md`.
+  - Flag as P1 any new outbound destination or process chain rooted in
+    build/test tooling that the PR description does not explain.
+- Do not attribute destination churn under `dockerd`, `hosted-compute-*`,
+  `provjobd`, `systemd-network`, or GitHub/Azure infrastructure address ranges
+  to the PR; classify it as GitHub-hosted runner platform behavior.
+- If the evidence file's recorded SHA is older than the PR head, check whether
+  the later commits touch only review metadata (`AGENTS.md`, `.garnet/**`).
+  If so, the evidence remains representative; otherwise call it stale.
+- Keep runtime claims honest: label findings backed by the recording as
+  "verified at runtime" and everything else as static inference. Note that
+  runtime evidence covers only the recorded jobs (here: `cargo-deny`), not
+  paths CI never executed.
+
 ### Crate API surface
 
 Keep crate API surfaces as small as possible. Avoid proliferating test-only helpers.
