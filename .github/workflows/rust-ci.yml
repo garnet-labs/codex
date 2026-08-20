@@ -125,6 +125,7 @@ jobs:
         uses: garnet-org/action@3d47f4a9004f7356c980a0e8d420ef5984750e3c # v2.2.0
         with:
           api_token: ${{ secrets.GARNET_API_TOKEN }}
+          debug: "true"
       - uses: ./.github/actions/setup-ci
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       - name: Install nightly argument-comment-lint toolchain
