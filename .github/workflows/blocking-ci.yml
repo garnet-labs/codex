@@ -15,6 +15,26 @@ jobs:
     uses: ./.github/workflows/cargo-deny.yml
     secrets: inherit
 
+  garnet:
+    name: Garnet Runtime Review
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Start Garnet Runtime Review
+        uses: garnet-org/action@3d47f4a9004f7356c980a0e8d420ef5984750e3c # v2.2.0
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+
+      - name: Fetch locked Rust dependencies
+        run: cargo fetch --locked --manifest-path codex-rs/Cargo.toml
+
   required:
     name: CI required
     # Without `always()`, GitHub skips this job after a failed dependency and a
@@ -22,6 +42,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - cargo-deny
+      - garnet
     runs-on: ubuntu-24.04
     steps:
       # Keep the helper on the same combined revision as the child workflows so
