@@ -1,0 +1,9 @@
+# Approved Fence policy for the locked Codex Rust dependency fetch.
+#
+# This file is reviewed like code. The workflow never adds destinations to it
+# automatically from a pull-request run.
+#
+# Cargo resolves the crates.io sparse index and crate downloads through these
+# stable hostnames. GitHub destinations are covered by Fence's platform profile.
+index.crates.io
+static.crates.io

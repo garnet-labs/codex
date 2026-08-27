@@ -1,0 +1,28 @@
+[
+  {
+    "metadata": {
+      "destination_domain": "dualstack.k.sni.global.fastly.net",
+      "process_name": "cargo",
+      "remote_port": 443,
+      "protocol": "TCP",
+      "step": "Fetch locked Rust dependencies"
+    }
+  },
+  {
+    "metadata": {
+      "destination_domain": "github.com",
+      "process_name": "cargo",
+      "remote_port": 443,
+      "protocol": "TCP",
+      "step": "Fetch locked Rust dependencies"
+    }
+  },
+  {
+    "metadata": {
+      "destination_domain": "169.254.169.254",
+      "process_name": "Host process",
+      "remote_port": 80,
+      "protocol": "TCP"
+    }
+  }
+]
