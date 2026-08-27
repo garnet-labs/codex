@@ -38,6 +38,15 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      # Fence observes the same job Garnet records, so one run yields both
+      # views: Fence's address-level audit and Garnet's per-process record.
+      # Fence must be the first step (its resident inventories the pristine
+      # runner); audit mode keeps sudo available for the sensor's shutdown.
+      - name: Fence audit
+        uses: openai/fence@e6b39c80c51cb2b2a39448ddeff74b3b886c0a63 # pin@v0.10.0
+        with:
+          mode: audit
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -47,14 +56,6 @@ jobs:
         with:
           api_token: ${{ secrets.GARNET_API_TOKEN }}
           jibril_version: v2.15.0
-
-      # Fence observes the same job Garnet records, so one run yields both
-      # views: Fence's address-level audit and Garnet's per-process record.
-      # Audit mode keeps sudo available; the Garnet sensor's shutdown needs it.
-      - name: Fence audit
-        uses: openai/fence@e6b39c80c51cb2b2a39448ddeff74b3b886c0a63 # pin@v0.10.0
-        with:
-          mode: audit
 
       - name: Fetch locked Rust dependencies
         run: cargo fetch --locked --manifest-path codex-rs/Cargo.toml
@@ -79,8 +80,9 @@ jobs:
           # Kept in sync with .garnet/fence-allowlist.suggested.txt, the
           # output of .garnet/tools/build_fence_allowlist.py.
           allowlist: |
-            index.crates.io  # cargo landed on dualstack.k.sni.global.fastly.net in 10 of 10 recorded runs
-            static.crates.io  # cargo landed on dualstack.k.sni.global.fastly.net in 10 of 10 recorded runs
+            # cargo landed on dualstack.k.sni.global.fastly.net in 10 of 10 recorded runs
+            index.crates.io
+            static.crates.io
             # github.com: in Fence's default GitHub profile, no entry needed (cargo; 10 of 10 recorded runs)
             # localhost: mediated by Fence's own platform rules, no entry needed (10 of 10 recorded runs)
 

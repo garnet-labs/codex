@@ -5,7 +5,9 @@ Reads .garnet/evidence/actions.ndjson, keeps the workload actions of the
 `garnet` job (the `cargo fetch --locked` step), and emits the destinations in
 Fence's allowlist syntax (openai/fence, docs/allowlist.md) with one comment
 per line carrying the recorded justification and the stability count: in how
-many of the recorded runs of that step the destination appeared.
+many of the recorded runs of that step the destination appeared. Fence's
+parser accepts full-line `#` comments only, so each justification precedes
+its entry.
 
 Garnet records where each connection landed (the resolved edge, e.g.
 `dualstack.k.sni.global.fastly.net`); Fence authorizes the hostname the
@@ -71,10 +73,12 @@ def main() -> None:
         elif destination in FENCE_DEFAULT_PROFILE:
             print(f"# {destination}: in Fence's default GitHub profile, no entry needed ({processes}; {stability})")
         elif destination in EDGE_TO_QUERIED:
+            print(f"# {processes} landed on {destination} in {stability}")
             for queried in EDGE_TO_QUERIED[destination]:
-                print(f"{queried}  # {processes} landed on {destination} in {stability}")
+                print(queried)
         else:
-            print(f"{destination}  # {processes}; {stability}")
+            print(f"# {processes}; {stability}")
+            print(destination)
 
 
 if __name__ == "__main__":
