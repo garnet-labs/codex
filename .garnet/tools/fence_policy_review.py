@@ -265,10 +265,10 @@ def render(
     policy_matches = complete and not additions
 
     lines = [
-        "# Fence policy evidence",
+        "## Evidence behind the decision",
         "",
-        f"**Coverage:** {'Full' if complete else 'Degraded'}",
-        f"**Decision:** {'Policy matches observed workload' if policy_matches else 'Review required'}",
+        f"**Coverage:** {'Full for this job' if complete else 'Degraded'}",
+        f"**Policy delta:** {'No change required' if policy_matches else 'Review required'}",
         "**Workload:** `cargo fetch --locked --manifest-path codex-rs/Cargo.toml`",
         "",
     ]
@@ -278,7 +278,7 @@ def render(
     if collection_error:
         lines.extend(
             [
-                "## Evidence failure",
+            "### Evidence failure",
                 "",
                 f"`{collection_error}`",
                 "",
@@ -289,7 +289,7 @@ def render(
 
     lines.extend(
         [
-            "## Approved policy",
+            "### Approved policy",
             "",
             "| Destination | Observed now | Decision |",
             "| --- | --- | --- |",
@@ -304,7 +304,7 @@ def render(
         )
         lines.append(f"| `{destination}` | {status} | {decision} |")
 
-    lines.extend(["", "## Proposed additions", ""])
+    lines.extend(["", "### Proposed additions", ""])
     if additions:
         for destination in sorted(additions):
             related = [
@@ -322,7 +322,7 @@ def render(
     else:
         lines.append("- None.")
 
-    lines.extend(["", "## Excluded platform traffic", ""])
+    lines.extend(["", "### Excluded platform traffic", ""])
     if excluded:
         for destination in sorted(excluded):
             lines.append(
@@ -335,7 +335,7 @@ def render(
     lines.extend(
         [
             "",
-            "## Review semantics",
+            "### Review semantics",
             "",
             "- Policy additions are never authorized automatically from PR behavior.",
             "- Non-observation is not proof of non-use.",

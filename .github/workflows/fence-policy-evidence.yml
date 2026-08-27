@@ -142,16 +142,41 @@ jobs:
             const fs = require("fs");
             const marker = "<!-- garnet-fence-policy-evidence -->";
             const report = fs.readFileSync(process.env.REPORT_PATH, "utf8");
+            const passed =
+              process.env.OBSERVATION_RESULT === "success" &&
+              process.env.POLICY_REVIEW_RESULT === "success" &&
+              process.env.ENFORCEMENT_RESULT === "success";
+            const decision = passed ? "PASS" : "REVIEW REQUIRED";
+            const summary = passed
+              ? "The checked-in egress policy matched the behavior Garnet observed, and Fence allowed the identical workload to complete in block mode."
+              : "The evidence or enforcement chain is incomplete. Do not add or remove policy entries until the failed stage is reviewed.";
             const body = [
               marker,
+              "# Garnet + Fence runtime policy review",
+              "",
+              `**Decision: ${decision}**`,
+              "",
+              summary,
+              "",
+              "## Why this is useful",
+              "",
+              "- **Garnet explains the policy:** which destination the covered job used, with process and workflow context.",
+              "- **Fence enforces the policy:** the same workload is replayed with undeclared egress blocked.",
+              "- **The reviewer stays in the PR:** policy delta, coverage, runtime receipt, and enforcement result are attached to this commit.",
+              "",
+              "## End-to-end result",
+              "",
+              "| Stage | Result | What it answers |",
+              "| --- | --- | --- |",
+              `| Observe with Garnet | **${process.env.OBSERVATION_RESULT}** | What did this job actually contact? |`,
+              `| Review policy delta | **${process.env.POLICY_REVIEW_RESULT}** | Does the checked-in policy explain it? |`,
+              `| Replay with Fence | **${process.env.ENFORCEMENT_RESULT}** | Is that policy sufficient in block mode? |`,
+              "",
+              "**Coverage boundary:** one GitHub-hosted Ubuntu job running the locked Codex Rust dependency fetch. This is not a repository-wide, macOS, Windows, or self-hosted-runner claim.",
+              "",
+              `**Evidence commit:** \`${context.sha}\``,
+              "",
               report,
-              "## Workflow result",
-              "",
-              `- Observation: **${process.env.OBSERVATION_RESULT}**`,
-              `- Policy review: **${process.env.POLICY_REVIEW_RESULT}**`,
-              `- Fence enforcement replay: **${process.env.ENFORCEMENT_RESULT}**`,
-              "",
-              `Evidence is bound to commit \`${context.sha}\`.`,
             ].join("\n");
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
