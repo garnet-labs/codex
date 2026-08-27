@@ -1,113 +1,196 @@
-pub use codex_backend_openapi_models::models::AdditionalRateLimitDetails;
-pub use codex_backend_openapi_models::models::ConfigFileResponse;
+pub use codex_backend_openapi_models::models::ConfigBundleResponse;
 pub use codex_backend_openapi_models::models::CreditStatusDetails;
+pub use codex_backend_openapi_models::models::DeliveredConfigToml;
+pub use codex_backend_openapi_models::models::DeliveredManagedLayers;
+pub use codex_backend_openapi_models::models::DeliveredRequirementsToml;
+pub use codex_backend_openapi_models::models::DeliveredTomlFragment;
 pub use codex_backend_openapi_models::models::PaginatedListTaskListItem;
 pub use codex_backend_openapi_models::models::PlanType;
+pub use codex_backend_openapi_models::models::RateLimitReachedKind;
 pub use codex_backend_openapi_models::models::RateLimitStatusDetails;
+pub use codex_backend_openapi_models::models::RateLimitStatusPayload;
 pub use codex_backend_openapi_models::models::RateLimitWindowSnapshot;
+pub use codex_backend_openapi_models::models::SpendControlLimitDetails;
 pub use codex_backend_openapi_models::models::TaskListItem;
 
+use codex_protocol::protocol::RateLimitSnapshot;
 use serde::Deserialize;
-use serde::Serialize;
 use serde::de::Deserializer;
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkspaceRole {
-    AccountOwner,
-    AccountAdmin,
-    StandardUser,
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct RateLimitResetCreditsSummary {
+    pub available_count: i64,
 }
 
-impl WorkspaceRole {
-    pub fn from_api_str(value: &str) -> Option<Self> {
-        match value {
-            "account-owner" | "account_owner" => Some(Self::AccountOwner),
-            "account-admin" | "account_admin" => Some(Self::AccountAdmin),
-            "standard-user" | "standard_user" | "member" => Some(Self::StandardUser),
-            _ => None,
-        }
-    }
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct RateLimitResetCreditsDetails {
+    pub credits: Vec<RateLimitResetCreditDetails>,
+    pub available_count: i64,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct AccountsCheckV4Response {
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct RateLimitResetCreditDetails {
+    pub id: String,
+    pub reset_type: String,
+    pub status: String,
+    pub granted_at: String,
+    pub expires_at: Option<String>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RateLimitsWithResetCredits {
+    pub rate_limits: Vec<RateLimitSnapshot>,
+    pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub(crate) struct RateLimitStatusWithResetCredits {
+    #[serde(flatten)]
+    pub rate_limits: RateLimitStatusPayload,
+    pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CodexWorkspaceMessagesResponse {
     #[serde(default)]
-    pub accounts: HashMap<String, AccountsCheckV4AccountItem>,
+    pub messages: Vec<CodexWorkspaceMessage>,
+}
+
+/// Authenticated Codex user settings used by CLI runtime policy.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct CodexUserSettingsResponse {
+    /// Server-computed effective commit-attribution policy.
+    ///
+    /// Older backend responses omit this field, which safely defaults to disabled.
     #[serde(default)]
+    pub commit_attribution_enabled: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CodexWorkspaceMessage {
+    pub message_id: String,
+    pub message_type: CodexWorkspaceMessageType,
+    pub message_body: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub archived_at: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsumeRateLimitResetCreditCode {
+    Reset,
+    NothingToReset,
+    NoCredit,
+    AlreadyRedeemed,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ConsumeRateLimitResetCreditResponse {
+    pub code: ConsumeRateLimitResetCreditCode,
+    #[serde(default)]
+    pub windows_reset: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexWorkspaceMessageType {
+    Headline,
+    Announcement,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Debug)]
+pub struct AccountsCheckResponse {
+    pub accounts: Vec<AccountEntry>,
     pub account_ordering: Vec<String>,
+    pub default_account_id: Option<String>,
 }
 
-impl AccountsCheckV4Response {
-    pub fn current_workspace_role(
-        &self,
-        current_account_id: Option<&str>,
-    ) -> Option<WorkspaceRole> {
-        let account = if let Some(account_id) = current_account_id {
-            self.accounts.get(account_id)?
-        } else {
-            self.account_ordering
-                .iter()
-                .find_map(|account_id| self.accounts.get(account_id))
-                .or_else(|| {
-                    if self.accounts.len() == 1 {
-                        self.accounts.values().next()
-                    } else {
-                        None
-                    }
-                })?
-        };
-        account
-            .account
-            .as_ref()
-            .and_then(|account| account.account_user_role.as_deref())
-            .and_then(WorkspaceRole::from_api_str)
+#[derive(Clone, Debug, Deserialize)]
+pub struct AccountEntry {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub profile_picture_url: Option<String>,
+    #[serde(default)]
+    pub structure: String,
+}
+
+#[derive(Deserialize)]
+struct RawAccountsCheckResponse {
+    #[serde(default)]
+    accounts: RawAccounts,
+    #[serde(default)]
+    account_ordering: Vec<String>,
+    #[serde(default)]
+    default_account_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawAccounts {
+    List(Vec<AccountEntry>),
+    Map(HashMap<String, ChatGptAccountEntry>),
+}
+
+impl Default for RawAccounts {
+    fn default() -> Self {
+        Self::List(Vec::new())
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct AccountsCheckV4AccountItem {
+#[derive(Deserialize)]
+struct ChatGptAccountEntry {
+    account: ChatGptAccountInfo,
+}
+
+#[derive(Deserialize)]
+struct ChatGptAccountInfo {
+    account_id: Option<String>,
     #[serde(default)]
-    pub account: Option<AccountsCheckV4Account>,
+    name: Option<String>,
+    #[serde(default)]
+    profile_picture_url: Option<String>,
+    #[serde(default)]
+    structure: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct AccountsCheckV4Account {
-    #[serde(default, rename = "account_user_role")]
-    pub account_user_role: Option<String>,
-}
-
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RateLimitStatusPayload {
-    #[serde(rename = "plan_type")]
-    pub plan_type: PlanType,
-    #[serde(
-        rename = "rate_limit",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub rate_limit: Option<Box<RateLimitStatusDetails>>,
-    #[serde(rename = "credits", default, skip_serializing_if = "Option::is_none")]
-    pub credits: Option<Box<CreditStatusDetails>>,
-    #[serde(
-        rename = "additional_rate_limits",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub additional_rate_limits: Option<Vec<AdditionalRateLimitDetails>>,
-    #[serde(
-        rename = "spend_control",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub spend_control: Option<Box<SpendControlStatusDetails>>,
-}
-
-#[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SpendControlStatusDetails {
-    #[serde(rename = "reached")]
-    pub reached: bool,
+impl<'de> Deserialize<'de> for AccountsCheckResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawAccountsCheckResponse::deserialize(deserializer)?;
+        let accounts = match raw.accounts {
+            RawAccounts::List(accounts) => accounts,
+            RawAccounts::Map(mut accounts) => raw
+                .account_ordering
+                .iter()
+                .filter_map(|account_id| {
+                    let account = accounts.remove(account_id)?.account;
+                    Some(AccountEntry {
+                        id: account.account_id?,
+                        name: account.name,
+                        profile_picture_url: account.profile_picture_url,
+                        structure: account.structure,
+                    })
+                })
+                .collect(),
+        };
+        Ok(Self {
+            accounts,
+            account_ordering: raw.account_ordering,
+            default_account_id: raw.default_account_id,
+        })
+    }
 }
 
 /// Hand-rolled models for the Cloud Tasks task-details response.
@@ -318,83 +401,6 @@ impl Turn {
     }
 }
 
-#[cfg(test)]
-mod accounts_check_tests {
-    use super::AccountsCheckV4Account;
-    use super::AccountsCheckV4AccountItem;
-    use super::AccountsCheckV4Response;
-    use super::WorkspaceRole;
-    use pretty_assertions::assert_eq;
-    use std::collections::HashMap;
-
-    #[test]
-    fn current_workspace_role_prefers_current_account_id() {
-        let response = AccountsCheckV4Response {
-            accounts: HashMap::from([
-                (
-                    "workspace-a".to_string(),
-                    AccountsCheckV4AccountItem {
-                        account: Some(AccountsCheckV4Account {
-                            account_user_role: Some("standard-user".to_string()),
-                        }),
-                    },
-                ),
-                (
-                    "workspace-b".to_string(),
-                    AccountsCheckV4AccountItem {
-                        account: Some(AccountsCheckV4Account {
-                            account_user_role: Some("account-owner".to_string()),
-                        }),
-                    },
-                ),
-            ]),
-            account_ordering: vec!["workspace-a".to_string(), "workspace-b".to_string()],
-        };
-
-        assert_eq!(
-            response.current_workspace_role(Some("workspace-b")),
-            Some(WorkspaceRole::AccountOwner)
-        );
-    }
-
-    #[test]
-    fn current_workspace_role_falls_back_to_account_ordering() {
-        let response = AccountsCheckV4Response {
-            accounts: HashMap::from([(
-                "workspace-a".to_string(),
-                AccountsCheckV4AccountItem {
-                    account: Some(AccountsCheckV4Account {
-                        account_user_role: Some("account_admin".to_string()),
-                    }),
-                },
-            )]),
-            account_ordering: vec!["workspace-a".to_string()],
-        };
-
-        assert_eq!(
-            response.current_workspace_role(/*current_account_id*/ None),
-            Some(WorkspaceRole::AccountAdmin)
-        );
-    }
-
-    #[test]
-    fn current_workspace_role_does_not_fall_back_when_current_account_missing() {
-        let response = AccountsCheckV4Response {
-            accounts: HashMap::from([(
-                "workspace-a".to_string(),
-                AccountsCheckV4AccountItem {
-                    account: Some(AccountsCheckV4Account {
-                        account_user_role: Some("account-owner".to_string()),
-                    }),
-                },
-            )]),
-            account_ordering: vec!["workspace-a".to_string()],
-        };
-
-        assert_eq!(response.current_workspace_role(Some("workspace-b")), None);
-    }
-}
-
 impl WorklogMessage {
     fn is_assistant(&self) -> bool {
         self.author
@@ -492,6 +498,27 @@ pub struct TurnAttemptsSiblingTurnsResponse {
     pub sibling_turns: Vec<HashMap<String, Value>>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct TokenUsageProfile {
+    pub stats: TokenUsageProfileStats,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct TokenUsageProfileStats {
+    pub lifetime_tokens: Option<i64>,
+    pub peak_daily_tokens: Option<i64>,
+    pub longest_running_turn_sec: Option<i64>,
+    pub current_streak_days: Option<i64>,
+    pub longest_streak_days: Option<i64>,
+    pub daily_usage_buckets: Option<Vec<TokenUsageProfileDailyBucket>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct TokenUsageProfileDailyBucket {
+    pub start_date: String,
+    pub tokens: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +573,62 @@ Second line"
             .assistant_error_message()
             .expect("error should be present");
         assert_eq!(msg, "APPLY_FAILED: Patch could not be applied");
+    }
+
+    #[test]
+    fn workspace_messages_response_deserializes_messages() {
+        let response: CodexWorkspaceMessagesResponse = serde_json::from_value(serde_json::json!({
+            "messages": [
+                {
+                    "message_id": "headline-id",
+                    "message_type": "headline",
+                    "message_body": "Headline body",
+                    "created_at": "2026-06-14T00:00:00Z",
+                    "archived_at": null
+                },
+                {
+                    "message_id": "announcement-id",
+                    "message_type": "announcement",
+                    "message_body": "Announcement body",
+                    "created_at": "2026-06-14T01:00:00Z",
+                    "archived_at": null
+                },
+                {
+                    "message_id": "unknown-id",
+                    "message_type": "unknown",
+                    "message_body": "Unknown body"
+                }
+            ]
+        }))
+        .expect("workspace messages response should deserialize");
+
+        assert_eq!(
+            response,
+            CodexWorkspaceMessagesResponse {
+                messages: vec![
+                    CodexWorkspaceMessage {
+                        message_id: "headline-id".to_string(),
+                        message_type: CodexWorkspaceMessageType::Headline,
+                        message_body: "Headline body".to_string(),
+                        created_at: Some("2026-06-14T00:00:00Z".to_string()),
+                        archived_at: None,
+                    },
+                    CodexWorkspaceMessage {
+                        message_id: "announcement-id".to_string(),
+                        message_type: CodexWorkspaceMessageType::Announcement,
+                        message_body: "Announcement body".to_string(),
+                        created_at: Some("2026-06-14T01:00:00Z".to_string()),
+                        archived_at: None,
+                    },
+                    CodexWorkspaceMessage {
+                        message_id: "unknown-id".to_string(),
+                        message_type: CodexWorkspaceMessageType::Unknown,
+                        message_body: "Unknown body".to_string(),
+                        created_at: None,
+                        archived_at: None,
+                    },
+                ],
+            }
+        );
     }
 }
