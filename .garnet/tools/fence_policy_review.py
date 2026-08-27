@@ -260,27 +260,22 @@ def collect_live(args: argparse.Namespace) -> tuple[Any, str]:
         raise RuntimeError(f"no Garnet profile appeared for this run{detail}")
 
     profile = profiles[0]
-    agent_id = recursive_value(profile, {"agent_id", "agentid"})
     profile_id = str(
         profile.get("profile_id") or profile.get("profileId") or profile.get("id") or ""
     )
     profile_url = recursive_value(
         profile, {"profile_url", "public_url", "publicurl", "url"}
     )
-    if not agent_id:
-        raise RuntimeError("Garnet profile did not expose an agent ID")
+    if not profile_id:
+        raise RuntimeError("Garnet profile did not expose a profile ID")
 
-    events = run_json(
+    recorded_profile = run_json(
         [
             str(args.garnetctl),
-            "list",
-            "events",
-            "--agent-id",
-            agent_id,
-            "--kinds",
-            "flows",
-            "--first",
-            "200",
+            "get",
+            "profile",
+            "--profile-id",
+            profile_id,
             "--format",
             "json",
         ]
@@ -290,7 +285,7 @@ def collect_live(args: argparse.Namespace) -> tuple[Any, str]:
             f"https://app.garnet.ai/public/runs/{args.run_id}"
             f"?profile={profile_id}"
         )
-    return events, profile_url
+    return recorded_profile, profile_url
 
 
 def policy_hosts(observations: list[Observation]) -> tuple[set[str], set[str]]:
