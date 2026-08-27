@@ -1,0 +1,56 @@
+name: Garnet runtime coverage
+
+# The repository's own jobs carry the Garnet step (rust-ci, repo-checks, sdk,
+# cargo-deny). One of them cannot run here: sdk / python-sdk targets the
+# self-hosted `codex-linux-x64` runner group, which does not exist in this fork,
+# so it ends without acquiring a runner and never executes a step.
+#
+# This job runs that same dependency install on a GitHub-hosted Linux runner so
+# the Python SDK's install path is recorded. It exists only because of the
+# missing runner group; upstream, the Garnet step in sdk.yml covers it.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  python-sdk-install:
+    name: Python SDK dependency install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Garnet Runtime Review
+        uses: garnet-org/action@3d47f4a9004f7356c980a0e8d420ef5984750e3c # v2.2.0
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+          jibril_version: v2.15.0
+
+      # Same container and install command as sdk / python-sdk.
+      - name: Install Python SDK dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/codex-python-sdk-home \
+            -e UV_LINK_MODE=copy \
+            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
+            -w "${GITHUB_WORKSPACE}/sdk/python" \
+            python:3.12-slim \
+            sh -euxc '
+              python -m venv /tmp/uv
+              /tmp/uv/bin/python -m pip install uv==0.11.3
+              /tmp/uv/bin/uv sync --group dev --frozen
+            '
