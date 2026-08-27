@@ -225,7 +225,7 @@ def collect_live(args: argparse.Namespace) -> tuple[Any, str]:
             "--kinds",
             "flows",
             "--first",
-            "1000",
+            "200",
             "--format",
             "json",
         ]
