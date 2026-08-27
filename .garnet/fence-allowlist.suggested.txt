@@ -1,0 +1,7 @@
+# Derived from Garnet's record of the `garnet` job's "Fetch locked Rust dependencies" step
+# across 10 recorded runs (.garnet/evidence/actions.ndjson).
+# Suggestion only: the allowlist stays repo-owned and human-approved.
+index.crates.io  # cargo landed on dualstack.k.sni.global.fastly.net in 10 of 10 recorded runs
+static.crates.io  # cargo landed on dualstack.k.sni.global.fastly.net in 10 of 10 recorded runs
+# github.com: in Fence's default GitHub profile, no entry needed (cargo; 10 of 10 recorded runs)
+# localhost: mediated by Fence's own platform rules, no entry needed (10 of 10 recorded runs)
