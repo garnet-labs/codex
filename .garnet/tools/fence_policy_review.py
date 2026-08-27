@@ -314,7 +314,13 @@ def render(
     observed, excluded = policy_hosts(observations)
     additions = observed - policy
     removable = policy - observed
-    complete = not collection_error and bool(observations)
+    evidence_error = collection_error
+    if not evidence_error and not observed:
+        evidence_error = (
+            "No workload egress was captured; only excluded platform traffic "
+            "or no attributable destinations were present."
+        )
+    complete = not evidence_error
     policy_matches = complete and not additions
 
     lines = [
@@ -326,14 +332,14 @@ def render(
         "",
     ]
     if profile_url:
-        lines.append(f"**Runtime receipt:** {profile_url}")
+        lines.append(f"**Runtime receipt:** [Open the recorded profile]({profile_url})")
         lines.append("")
-    if collection_error:
+    if evidence_error:
         lines.extend(
             [
-            "### Evidence failure",
+                "### Evidence failure",
                 "",
-                f"`{collection_error}`",
+                f"`{evidence_error}`",
                 "",
                 "No absence-based or policy-removal conclusion is valid.",
                 "",
