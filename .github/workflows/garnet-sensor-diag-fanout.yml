@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - devin/sensor-start-diag
+  pull_request:
+    branches:
+      - main
 
 jobs:
   fanout:
@@ -12,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        n: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -37,3 +40,33 @@ jobs:
         shell: bash
         run: |
           curl -sS -o /dev/null https://pypi.org/simple/ || true
+
+  replica:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Garnet Runtime Review
+        uses: garnet-org/action@3d47f4a9004f7356c980a0e8d420ef5984750e3c # v2.2.0
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+          jibril_version: v2.15.0
+
+      - name: Sensor state
+        if: always()
+        shell: bash
+        run: |
+          echo "=== is-active: $(systemctl is-active jibril.service || true)"
+          sudo systemctl status jibril.service --no-pager -l || true
+          echo "=== journal"
+          sudo journalctl -xeu jibril.service --no-pager | tail -200 || true
+
+      - name: Jibril configuration
+        if: always()
+        shell: bash
+        run: |
+          sudo cat /etc/jibril/netpolicy.yaml || true
+          sudo cat /etc/jibril/config.yaml || true
