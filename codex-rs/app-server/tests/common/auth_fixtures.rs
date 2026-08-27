@@ -6,12 +6,13 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::DateTime;
 use chrono::Utc;
-use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthDotJson;
+use codex_login::AuthKeyringBackendKind;
 use codex_login::save_auth;
 use codex_login::token_data::TokenData;
 use codex_login::token_data::parse_chatgpt_jwt_claims;
+use codex_protocol::auth::AuthMode;
 use serde_json::json;
 
 /// Builder for writing a fake ChatGPT auth.json in tests.
@@ -60,11 +61,6 @@ impl ChatGptAuthFixture {
         self
     }
 
-    pub fn is_org_owner(mut self, is_org_owner: bool) -> Self {
-        self.claims.is_org_owner = Some(is_org_owner);
-        self
-    }
-
     pub fn email(mut self, email: impl Into<String>) -> Self {
         self.claims.email = Some(email.into());
         self
@@ -87,7 +83,6 @@ pub struct ChatGptIdTokenClaims {
     pub plan_type: Option<String>,
     pub chatgpt_user_id: Option<String>,
     pub chatgpt_account_id: Option<String>,
-    pub is_org_owner: Option<bool>,
 }
 
 impl ChatGptIdTokenClaims {
@@ -114,11 +109,6 @@ impl ChatGptIdTokenClaims {
         self.chatgpt_account_id = Some(chatgpt_account_id.into());
         self
     }
-
-    pub fn is_org_owner(mut self, is_org_owner: bool) -> Self {
-        self.is_org_owner = Some(is_org_owner);
-        self
-    }
 }
 
 pub fn encode_id_token(claims: &ChatGptIdTokenClaims) -> Result<String> {
@@ -136,9 +126,6 @@ pub fn encode_id_token(claims: &ChatGptIdTokenClaims) -> Result<String> {
     }
     if let Some(chatgpt_account_id) = &claims.chatgpt_account_id {
         auth_payload.insert("chatgpt_account_id".to_string(), json!(chatgpt_account_id));
-    }
-    if let Some(is_org_owner) = claims.is_org_owner {
-        auth_payload.insert("is_org_owner".to_string(), json!(is_org_owner));
     }
     if !auth_payload.is_empty() {
         payload.insert(
@@ -177,7 +164,16 @@ pub fn write_chatgpt_auth(
         openai_api_key: None,
         tokens: Some(tokens),
         last_refresh,
+        agent_identity: None,
+        personal_access_token: None,
+        bedrock_api_key: None,
     };
 
-    save_auth(codex_home, &auth, cli_auth_credentials_store_mode).context("write auth.json")
+    save_auth(
+        codex_home,
+        &auth,
+        cli_auth_credentials_store_mode,
+        AuthKeyringBackendKind::default(),
+    )
+    .context("write auth.json")
 }
