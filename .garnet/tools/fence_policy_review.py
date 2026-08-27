@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 
 PLATFORM_DESTINATIONS = {
@@ -257,6 +259,22 @@ def run_json(command: list[str]) -> Any:
     return json.loads(result.stdout)
 
 
+def fetch_public_profile(run_id: str, profile_id: str) -> Any:
+    query = urlencode({"profile": profile_id})
+    url = f"https://app.garnet.ai/api/public/runs/{run_id}?{query}"
+    request = Request(url, headers={"Accept": "application/json"})
+    last_error = ""
+    for attempt in range(5):
+        try:
+            with urlopen(request, timeout=20) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            last_error = str(error)
+            if attempt < 4:
+                time.sleep(3)
+    raise RuntimeError(f"public Garnet profile was unavailable: {last_error}")
+
+
 def recursive_value(record: dict[str, Any], keys: set[str]) -> str:
     return first_scalar(record, keys)
 
@@ -304,17 +322,7 @@ def collect_live(args: argparse.Namespace) -> tuple[Any, str]:
     if not profile_id:
         raise RuntimeError("Garnet profile did not expose a profile ID")
 
-    recorded_profile = run_json(
-        [
-            str(args.garnetctl),
-            "get",
-            "profile",
-            "--profile-id",
-            profile_id,
-            "--format",
-            "json",
-        ]
-    )
+    recorded_profile = fetch_public_profile(str(args.run_id), profile_id)
     if profile_id:
         profile_url = (
             f"https://app.garnet.ai/public/runs/{args.run_id}"
