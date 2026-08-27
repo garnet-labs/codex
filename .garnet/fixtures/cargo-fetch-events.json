@@ -1,43 +1,48 @@
-[
-  {
-    "hostname": "runnervm-demo-policy-observe",
-    "data": {
-      "remote_names": ["dualstack.k.sni.global.fastly.net"],
-      "remote_address": "151.101.2.137",
-      "remote_ports": [443],
-      "protocol": "tcp",
-      "proc_trees": [{
-        "process": "cargo",
-        "ancestry": ["Runner.Worker", "bash", "cargo"],
-        "github_step": "Fetch locked Rust dependencies"
-      }]
+{
+  "profiles": [
+    {
+      "schema_version": "runtime-review-public/v3",
+      "associations": [
+        {
+          "remote_address": "127.0.0.53",
+          "remote_names": ["localhost"],
+          "process": "cargo",
+          "ancestry": ["Runner.Worker", "bash", "cargo"],
+          "github_step": "1. Fetch locked Rust dependencies"
+        },
+        {
+          "remote_address": "140.82.113.24",
+          "remote_names": ["140.82.113.24"],
+          "process": "hosted-compute-agent",
+          "ancestry": ["systemd", "hosted-compute-agent"],
+          "github_step": "99. Runner Processes"
+        },
+        {
+          "remote_address": "140.82.116.4",
+          "remote_names": ["github.com"],
+          "process": "cargo",
+          "ancestry": ["Runner.Worker", "bash", "cargo"],
+          "github_step": "1. Fetch locked Rust dependencies"
+        },
+        {
+          "remote_address": "151.101.22.137",
+          "remote_names": [
+            "dualstack.k.sni.global.fastly.net",
+            "fastly-index.crates.io",
+            "index.crates.io"
+          ],
+          "process": "cargo",
+          "ancestry": ["Runner.Worker", "bash", "cargo"],
+          "github_step": "1. Fetch locked Rust dependencies"
+        },
+        {
+          "remote_address": "ff02::2",
+          "remote_names": ["ip6-allrouters"],
+          "process": "systemd",
+          "ancestry": ["systemd"],
+          "github_step": "99. Runner Processes"
+        }
+      ]
     }
-  },
-  {
-    "hostname": "runnervm-demo-policy-observe",
-    "data": {
-      "remote_names": ["github.com", "140.82.114.4"],
-      "remote_address": "140.82.114.4",
-      "remote_ports": [443],
-      "protocol": "tcp",
-      "proc_trees": [{
-        "process": "cargo",
-        "ancestry": ["Runner.Worker", "bash", "cargo"],
-        "github_step": "Fetch locked Rust dependencies"
-      }]
-    }
-  },
-  {
-    "hostname": "runnervm-demo-policy-observe",
-    "data": {
-      "remote_names": [],
-      "remote_address": "169.254.169.254",
-      "remote_ports": [80],
-      "protocol": "tcp",
-      "proc_trees": [{
-        "process": "systemd",
-        "ancestry": ["systemd"]
-      }]
-    }
-  }
-]
+  ]
+}

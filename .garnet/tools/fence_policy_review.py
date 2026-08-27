@@ -28,6 +28,7 @@ from typing import Any, Iterable
 PLATFORM_DESTINATIONS = {
     "168.63.129.16",
     "169.254.169.254",
+    "ip6-allrouters",
     "localhost",
 }
 
@@ -43,7 +44,6 @@ FENCE_DEFAULT_DESTINATIONS = {
 EDGE_TO_POLICY_HOSTS = {
     "dualstack.k.sni.global.fastly.net": {
         "index.crates.io",
-        "static.crates.io",
     },
 }
 
@@ -104,6 +104,31 @@ def json_items(value: Any) -> list[dict[str, Any]]:
         if isinstance(nested, list):
             return [item for item in nested if isinstance(item, dict)]
     return [value]
+
+
+def flow_records(value: Any) -> Iterable[dict[str, Any]]:
+    if isinstance(value, list):
+        for item in value:
+            yield from flow_records(item)
+        return
+    if not isinstance(value, dict):
+        return
+
+    for key in ("associations", "egress_peers", "edges"):
+        nested = value.get(key)
+        if isinstance(nested, list):
+            for item in nested:
+                if isinstance(item, dict):
+                    yield item
+            return
+
+    for key in ("profiles", "profile", "jobs", "events", "items", "nodes", "results"):
+        nested = value.get(key)
+        if isinstance(nested, (dict, list)):
+            yield from flow_records(nested)
+            return
+
+    yield value
 
 
 def walk(value: Any) -> Iterable[tuple[str, Any]]:
@@ -183,7 +208,7 @@ def execution_context(record: dict[str, Any]) -> tuple[str, str]:
 
 def observations_from_events(events: Any) -> list[Observation]:
     observations = []
-    for event in json_items(events):
+    for event in flow_records(events):
         destination = (
             first_remote_name(event) or first_scalar(event, DESTINATION_KEYS)
         ).lower().rstrip(".")
@@ -293,7 +318,13 @@ def policy_hosts(observations: list[Observation]) -> tuple[set[str], set[str]]:
     excluded = set()
     for observation in observations:
         destination = observation.destination
-        if destination in PLATFORM_DESTINATIONS:
+        platform_process = observation.process in {
+            "hosted-compute-agent",
+            "Runner.Listener",
+            "Runner.Worker",
+        }
+        platform_step = observation.step.startswith("99. Runner Processes")
+        if destination in PLATFORM_DESTINATIONS or platform_process or platform_step:
             excluded.add(destination)
         elif destination in FENCE_DEFAULT_DESTINATIONS:
             excluded.add(destination)
