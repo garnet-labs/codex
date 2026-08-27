@@ -122,7 +122,17 @@ def flow_records(value: Any) -> Iterable[dict[str, Any]]:
                     yield item
             return
 
-    for key in ("profiles", "profile", "jobs", "events", "items", "nodes", "results"):
+    for key in (
+        "profiles",
+        "profile",
+        "data",
+        "record",
+        "jobs",
+        "events",
+        "items",
+        "nodes",
+        "results",
+    ):
         nested = value.get(key)
         if isinstance(nested, (dict, list)):
             yield from flow_records(nested)
