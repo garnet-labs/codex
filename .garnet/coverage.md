@@ -45,10 +45,10 @@ to this repository's own jobs.
 | Bazel / Verify release build on ubuntu-24.04 for x86_64-unknown-linux-gnu | hosted Linux | not instrumented | — | cancelled |
 | Bazel / Verify release build on windows-latest for x86_64-pc-windows-gnullvm | self-hosted Windows | no runner | — | failure |
 | Blob size policy / Blob size policy | hosted Linux | sensor failed | — | success |
-| CI required | hosted Linux | not instrumented | — | failure |
 | Codespell / Check for spelling errors | hosted Linux | recorded | 4 | success |
-| Garnet Runtime Review | hosted Linux | recorded | 8 | success |
 | Python SDK dependency install | hosted Linux | recorded | 18 | success |
+| CI required | hosted Linux | not instrumented | — | failure |
+| Garnet Runtime Review | hosted Linux | recorded | 8 | success |
 | cargo-deny / cargo-deny | hosted Linux | recorded | 36 | failure |
 | repo-checks / build-test | hosted Linux | sensor failed | — | failure |
 | rust-ci / Argument comment lint - Linux | hosted Linux | sensor failed | — | cancelled |
@@ -61,8 +61,8 @@ to this repository's own jobs.
 | rust-ci / cargo shear | hosted Linux | sensor failed | — | success |
 | sdk / python-sdk | self-hosted Linux | no runner | — | failure |
 | sdk / sdks | self-hosted Linux | no runner | — | failure |
-
 Totals: recorded 4, sensor failed 7, not instrumented 12, no runner 10.
+
 
 The Windows-named row on `hosted Linux` is not a mislabel: `Bazel test on
 windows-latest for x86_64-pc-windows-gnullvm` names its target, and its runner

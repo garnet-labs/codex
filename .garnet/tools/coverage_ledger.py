@@ -16,6 +16,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import zipfile
@@ -101,21 +102,21 @@ def evidence_actions(records, run_id, commit, job_name):
     )
 
 
+def words_of(value):
+    return {word for word in re.split(r"[^a-z0-9]+", value.lower()) if word}
+
+
 def evidence_job_for(job, available_jobs):
-    name = job["name"]
-    candidates = [name]
-    if " / " in name:
-        candidates.insert(0, name.split(" / ", 1)[0])
-    else:
-        candidates.insert(0, name.split(" ", 1)[0])
-    normalized = {
-        candidate.lower().replace(" ", "-"): candidate for candidate in candidates
-    }
-    for available in sorted(available_jobs):
-        if available.lower() in normalized:
-            return available
-    if len(available_jobs) == 1:
-        return next(iter(available_jobs))
+    name_words = words_of(job["name"])
+    matches = [
+        available
+        for available in sorted(available_jobs)
+        if words_of(available) <= name_words
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        return max(matches, key=lambda available: len(words_of(available)))
     return None
 
 
@@ -132,13 +133,13 @@ def sensor_state(job, actions):
     if not sensor_steps:
         return "not instrumented"
 
-    log = log_of(job["id"])
     if actions:
         return "recorded"
-    failed = "Jibril service failed to start" in log
-    started = "Jibril service started successfully" in log
-    if failed or started:
+    log = log_of(job["id"])
+    if "Jibril service failed to start" in log:
         return "sensor failed"
+    if "Jibril service started successfully" in log:
+        return "started, nothing recorded"
     return "sensor failed"
 
 
@@ -202,10 +203,16 @@ def main():
         )
 
     totals = collections.Counter(row["sensor"] for row in rows)
-    states = ("recorded", "sensor failed", "not instrumented", "no runner")
+    states = (
+        "recorded",
+        "sensor failed",
+        "started, nothing recorded",
+        "not instrumented",
+        "no runner",
+    )
     print(
         "Totals: "
-        + "; ".join(f"{state}: {totals[state]}" for state in states)
+        + ", ".join(f"{state} {totals[state]}" for state in states if totals[state])
         + "."
     )
     return 0
