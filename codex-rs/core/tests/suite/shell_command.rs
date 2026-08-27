@@ -1,6 +1,9 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::shell_environment::CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR;
+use core_test_support::TestTargetOs;
 use core_test_support::assert_regex_match;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -8,11 +11,14 @@ use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::skip_if_host_windows;
 use core_test_support::skip_if_no_network;
-use core_test_support::skip_if_windows;
+use core_test_support::skip_if_wine_exec;
 use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
+use core_test_support::test_target_os;
+use pretty_assertions::assert_eq;
 use serde_json::json;
 use test_case::test_case;
 
@@ -38,7 +44,6 @@ fn shell_responses_with_timeout(
         "login": login,
     });
 
-    #[allow(clippy::expect_used)]
     let arguments = serde_json::to_string(&args).expect("serialize shell command arguments");
 
     vec![
@@ -61,9 +66,7 @@ fn shell_responses(call_id: &str, command: &str, login: Option<bool>) -> Vec<Str
 async fn shell_command_harness_with(
     configure: impl FnOnce(TestCodexBuilder) -> TestCodexBuilder,
 ) -> Result<TestCodexHarness> {
-    let builder = configure(test_codex()).with_config(|config| {
-        config.include_apply_patch_tool = true;
-    });
+    let builder = configure(test_codex());
     TestCodexHarness::with_builder(builder).await
 }
 
@@ -109,7 +112,7 @@ fn assert_shell_command_output(output: &str, expected: &str) -> Result<()> {
 async fn shell_command_works() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.4")).await?;
 
     let call_id = "shell-command-call";
     mount_shell_responses(
@@ -128,10 +131,86 @@ async fn shell_command_works() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_command_does_not_expose_configured_noise_auth_token() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_wine_exec!(Ok(()), "shell_command is unavailable for Wine executors");
+
+    let builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+        config.permissions.shell_environment_policy.r#set.insert(
+            CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR.to_string(),
+            "configured-noise-token".to_string(),
+        );
+        config.permissions.shell_environment_policy.r#set.insert(
+            CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN_ENV_VAR.to_ascii_lowercase(),
+            "case-variant-noise-token".to_string(),
+        );
+    });
+    let harness = TestCodexHarness::with_auto_env_builder(builder).await?;
+    let command = match test_target_os() {
+        TestTargetOs::Linux | TestTargetOs::MacOs => {
+            "if [ -n \"${CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN:-}\" ] || [ -n \"${codex_exec_server_noise_auth_token:-}\" ]; then echo leaked; else echo unset; fi"
+        }
+        TestTargetOs::Windows => {
+            "if ($env:CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN) { Write-Output leaked } else { Write-Output unset }"
+        }
+    };
+    let call_id = "shell-command-noise-auth-token";
+    mount_shell_responses(&harness, call_id, command, /*login*/ None).await;
+    harness
+        .submit("check the remote execution auth token")
+        .await?;
+
+    assert_shell_command_output(&harness.function_call_stdout(call_id).await, "unset")?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shell_command_rejects_justification_without_sandbox_permissions() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.4")).await?;
+    let call_id = "shell-command-missing-sandbox-permissions";
+    let args = json!({
+        "command": "echo should not run",
+        "justification": "Allow this command",
+    });
+    mount_sse_sequence(
+        harness.server(),
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    harness
+        .submit_with_permission_profile(
+            "run the command with escalation",
+            PermissionProfile::Disabled,
+        )
+        .await?;
+
+    assert_eq!(
+        harness.function_call_stdout(call_id).await,
+        "`justification` requires an explicit `sandbox_permissions`; use `sandbox_permissions: \"require_escalated\"` for unsandboxed execution, or omit `justification`."
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn output_with_login() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.4")).await?;
 
     let call_id = "shell-command-call-login-true";
     mount_shell_responses(&harness, call_id, "echo 'hello, world'", Some(true)).await;
@@ -147,7 +226,7 @@ async fn output_with_login() -> anyhow::Result<()> {
 async fn output_without_login() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.4")).await?;
 
     let call_id = "shell-command-call-login-false";
     mount_shell_responses(&harness, call_id, "echo 'hello, world'", Some(false)).await;
@@ -163,7 +242,7 @@ async fn output_without_login() -> anyhow::Result<()> {
 async fn multi_line_output_with_login() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.4")).await?;
 
     let call_id = "shell-command-call-first-extra-login";
     mount_shell_responses(
@@ -184,9 +263,9 @@ async fn multi_line_output_with_login() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pipe_output_with_login() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
-    skip_if_windows!(Ok(()));
+    skip_if_host_windows!(Ok(()));
 
-    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.4")).await?;
 
     let call_id = "shell-command-call-second-extra-no-login";
     mount_shell_responses(
@@ -207,9 +286,9 @@ async fn pipe_output_with_login() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pipe_output_without_login() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
-    skip_if_windows!(Ok(()));
+    skip_if_host_windows!(Ok(()));
 
-    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.4")).await?;
 
     let call_id = "shell-command-call-third-extra-login-false";
     mount_shell_responses(&harness, call_id, "echo 'hello, world' | cat", Some(false)).await;
@@ -225,7 +304,7 @@ async fn pipe_output_without_login() -> anyhow::Result<()> {
 async fn shell_command_times_out_with_timeout_ms() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
+    let harness = shell_command_harness_with(|builder| builder.with_model("gpt-5.4")).await?;
     let call_id = "shell-command-timeout";
     let command = if cfg!(windows) {
         "timeout /t 5"

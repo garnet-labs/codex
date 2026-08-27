@@ -1,12 +1,12 @@
 use crate::config::Config;
 pub use codex_rollout::ARCHIVED_SESSIONS_SUBDIR;
 pub use codex_rollout::Cursor;
-pub use codex_rollout::EventPersistenceMode;
 pub use codex_rollout::INTERACTIVE_SESSION_SOURCES;
 pub use codex_rollout::RolloutRecorder;
 pub use codex_rollout::RolloutRecorderParams;
 pub use codex_rollout::SESSIONS_SUBDIR;
 pub use codex_rollout::SessionMeta;
+pub use codex_rollout::SortDirection;
 pub use codex_rollout::ThreadItem;
 pub use codex_rollout::ThreadSortKey;
 pub use codex_rollout::ThreadsPage;
@@ -28,8 +28,8 @@ impl codex_rollout::RolloutConfigView for Config {
         self.codex_home.as_path()
     }
 
-    fn sqlite_home(&self) -> &std::path::Path {
-        self.sqlite_home.as_path()
+    fn sqlite_config(&self) -> &codex_state::SqliteConfig {
+        self.sqlite_config()
     }
 
     fn cwd(&self) -> &std::path::Path {
@@ -46,22 +46,10 @@ impl codex_rollout::RolloutConfigView for Config {
 }
 
 pub(crate) mod list {
-    pub use codex_rollout::ThreadListConfig;
-    pub use codex_rollout::ThreadListLayout;
-    pub use codex_rollout::ThreadSortKey;
     pub use codex_rollout::find_thread_path_by_id_str;
-    pub use codex_rollout::get_threads_in_root;
 }
 
-pub(crate) mod metadata {
-    pub(crate) use codex_rollout::builder_from_items;
-}
-
-pub(crate) mod policy {
-    pub use codex_rollout::EventPersistenceMode;
-    pub use codex_rollout::should_persist_response_item_for_memories;
-}
-
+#[cfg(test)]
 pub(crate) mod recorder {
     pub use codex_rollout::RolloutRecorder;
 }
