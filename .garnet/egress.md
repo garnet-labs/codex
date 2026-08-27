@@ -105,6 +105,29 @@ One honest limit on the join: in the run recorded here the sensor failed to star
 in the Blob size policy job itself (see [`coverage.md`](coverage.md)), so this is a
 comparison of what each side reports about this CI, not two views of one job.
 
+## The derived allowlist, enforced
+
+`fence-allowlist.suggested.txt` is the burn-down turned into Fence's own syntax:
+the destinations the `garnet` job's "Fetch locked Rust dependencies" step reached
+in 10 of 10 recorded runs, each with the process that reached it and the
+stability count as a comment. `tools/build_fence_allowlist.py` regenerates it
+from the evidence.
+
+The `fence-enforced` job in `blocking-ci.yml` runs the same dependency fetch with
+`openai/fence` in `mode: block` and exactly that allowlist. On run
+[33098634205](https://github.com/garnet-labs/codex/actions/runs/33098634205/job/98610081093)
+it fetched all 1,211 crates green: Fence's own report shows `index.crates.io` and
+`static.crates.io` allowed, nothing blocked, and an empty `suggested_allowlist` —
+the record predicted the workload's egress exactly.
+
+Running both agents inside one job did not hold up: with the sensor recording,
+Fence's post-job check found its resident health evidence stale
+([run 33098634205, `garnet` job](https://github.com/garnet-labs/codex/actions/runs/33098634205/job/98610081514)),
+and in the job where Fence's check passed the sensor had failed to start. So the
+join is two lanes of one workflow run — the sensor records the workload in the
+`garnet` job, Fence enforces the derived allowlist on the identical workload in
+`fence-enforced` — not one co-instrumented job.
+
 ## Reading the totals
 
 A destination reached by processes in more than one class counts in each of them,
