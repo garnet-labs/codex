@@ -1,28 +1,43 @@
 [
   {
-    "metadata": {
-      "destination_domain": "dualstack.k.sni.global.fastly.net",
-      "process_name": "cargo",
-      "remote_port": 443,
-      "protocol": "TCP",
-      "step": "Fetch locked Rust dependencies"
+    "hostname": "runnervm-demo-policy-observe",
+    "data": {
+      "remote_names": ["dualstack.k.sni.global.fastly.net"],
+      "remote_address": "151.101.2.137",
+      "remote_ports": [443],
+      "protocol": "tcp",
+      "proc_trees": [{
+        "process": "cargo",
+        "ancestry": ["Runner.Worker", "bash", "cargo"],
+        "github_step": "Fetch locked Rust dependencies"
+      }]
     }
   },
   {
-    "metadata": {
-      "destination_domain": "github.com",
-      "process_name": "cargo",
-      "remote_port": 443,
-      "protocol": "TCP",
-      "step": "Fetch locked Rust dependencies"
+    "hostname": "runnervm-demo-policy-observe",
+    "data": {
+      "remote_names": ["github.com", "140.82.114.4"],
+      "remote_address": "140.82.114.4",
+      "remote_ports": [443],
+      "protocol": "tcp",
+      "proc_trees": [{
+        "process": "cargo",
+        "ancestry": ["Runner.Worker", "bash", "cargo"],
+        "github_step": "Fetch locked Rust dependencies"
+      }]
     }
   },
   {
-    "metadata": {
-      "destination_domain": "169.254.169.254",
-      "process_name": "Host process",
-      "remote_port": 80,
-      "protocol": "TCP"
+    "hostname": "runnervm-demo-policy-observe",
+    "data": {
+      "remote_names": [],
+      "remote_address": "169.254.169.254",
+      "remote_ports": [80],
+      "protocol": "tcp",
+      "proc_trees": [{
+        "process": "systemd",
+        "ancestry": ["systemd"]
+      }]
     }
   }
 ]

@@ -15,6 +15,7 @@ artifact for the pull request.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import subprocess
@@ -53,7 +54,6 @@ DESTINATION_KEYS = {
     "dst_domain",
     "dst_hostname",
     "fqdn",
-    "hostname",
     "remote_address",
     "remote_ip",
 }
@@ -130,18 +130,71 @@ def first_scalar(record: dict[str, Any], keys: set[str]) -> str:
     return ""
 
 
+def is_address(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value.strip().strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def first_remote_name(record: dict[str, Any]) -> str:
+    for key, value in walk(record):
+        if key != "remote_names" or not isinstance(value, list):
+            continue
+        names = [str(item).strip() for item in value if str(item).strip()]
+        for name in names:
+            if not is_address(name):
+                return name
+        if names:
+            return names[0]
+    return ""
+
+
+def dictionaries(value: Any) -> Iterable[dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from dictionaries(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from dictionaries(child)
+
+
+def execution_context(record: dict[str, Any]) -> tuple[str, str]:
+    candidates = list(dictionaries(record))
+    candidates.sort(key=lambda item: bool(item.get("github_step")), reverse=True)
+    for item in candidates:
+        ancestry = item.get("ancestry")
+        process = str(item.get("process") or "").strip()
+        if not process and isinstance(ancestry, list) and ancestry:
+            process = str(ancestry[-1]).strip()
+        step = str(item.get("github_step") or "").strip()
+        if process or step:
+            return (
+                process or "unknown",
+                step or "Fetch locked Rust dependencies",
+            )
+    return (
+        first_scalar(record, PROCESS_KEYS) or "unknown",
+        first_scalar(record, STEP_KEYS) or "Fetch locked Rust dependencies",
+    )
+
+
 def observations_from_events(events: Any) -> list[Observation]:
     observations = []
     for event in json_items(events):
-        destination = first_scalar(event, DESTINATION_KEYS).lower().rstrip(".")
+        destination = (
+            first_remote_name(event) or first_scalar(event, DESTINATION_KEYS)
+        ).lower().rstrip(".")
         if not destination:
             continue
+        process, step = execution_context(event)
         observations.append(
             Observation(
                 destination=destination,
-                process=first_scalar(event, PROCESS_KEYS) or "unknown",
-                step=first_scalar(event, STEP_KEYS)
-                or "Fetch locked Rust dependencies",
+                process=process,
+                step=step,
             )
         )
     return observations
@@ -208,7 +261,9 @@ def collect_live(args: argparse.Namespace) -> tuple[Any, str]:
 
     profile = profiles[0]
     agent_id = recursive_value(profile, {"agent_id", "agentid"})
-    profile_id = recursive_value(profile, {"profile_id", "profileid", "id"})
+    profile_id = str(
+        profile.get("profile_id") or profile.get("profileId") or profile.get("id") or ""
+    )
     profile_url = recursive_value(
         profile, {"profile_url", "public_url", "publicurl", "url"}
     )
@@ -230,8 +285,11 @@ def collect_live(args: argparse.Namespace) -> tuple[Any, str]:
             "json",
         ]
     )
-    if not profile_url and profile_id:
-        profile_url = f"https://app.garnet.ai/public/runs/{profile_id}"
+    if profile_id:
+        profile_url = (
+            f"https://app.garnet.ai/public/runs/{args.run_id}"
+            f"?profile={profile_id}"
+        )
     return events, profile_url
 
 
