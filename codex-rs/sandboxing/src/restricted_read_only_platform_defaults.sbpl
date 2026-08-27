@@ -1,4 +1,4 @@
-; macOS platform defaults included via `ReadOnlyAccess::Restricted::include_platform_defaults`
+; macOS platform defaults included when a split filesystem policy requests `:minimal`.
 
 ; Read access to standard system paths
 (allow file-read* file-test-existence
@@ -171,7 +171,6 @@
 (allow file-read* (subpath "/Library/Preferences"))
 (allow file-read* (subpath "/opt/homebrew/lib"))
 (allow file-read* (subpath "/usr/local/lib"))
-(allow file-read* (subpath "/Applications"))
 
 ; Terminal basics and device handles.
 (allow file-read* (regex "^/dev/fd/(0|1|2)$"))
