@@ -12,6 +12,19 @@ name: Garnet runtime coverage
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      checkout_ref:
+        description: Exact PR head SHA to cold-read
+        required: false
+        type: string
+      workload:
+        description: Dependency surface to exercise
+        required: false
+        default: python
+        type: choice
+        options:
+          - python
+          - cargo
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,12 +37,14 @@ permissions:
 jobs:
   python-sdk-install:
     name: Python SDK dependency install
+    if: github.event_name == 'pull_request' || inputs.workload != 'cargo'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+          ref: ${{ inputs.checkout_ref || github.event.pull_request.head.sha || github.sha }}
 
       - name: Garnet Runtime Review
         uses: garnet-org/action@3d47f4a9004f7356c980a0e8d420ef5984750e3c # v2.2.0
@@ -54,3 +69,23 @@ jobs:
               /tmp/uv/bin/python -m pip install uv==0.11.3
               /tmp/uv/bin/uv sync --group dev --frozen
             '
+
+  cargo-fetch:
+    name: Rust dependency fetch
+    if: github.event_name == 'workflow_dispatch' && inputs.workload == 'cargo'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Garnet Runtime Review
+        uses: garnet-org/action@3d47f4a9004f7356c980a0e8d420ef5984750e3c # v2.2.0
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+          jibril_version: v2.15.0
+
+      - name: Fetch Rust dependencies
+        run: cargo fetch --manifest-path codex-rs/Cargo.toml --locked
