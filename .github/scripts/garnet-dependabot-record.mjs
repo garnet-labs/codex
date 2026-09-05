@@ -153,7 +153,10 @@ export function planWorkloads(root, changed) {
         const lockVersion = /(?:^|\n)lockfileVersion:\s*['"]?(\d+)/.exec(pnpmLock)?.[1];
         const version = spec?.version || ({'9': '9.15.9', '6': '8.15.9', '5': '7.33.7'})[lockVersion];
         assert(version, 'BLOCKED: unsupported pnpm lockfile version without packageManager');
-        commands.push(`corepack install --global ${quote(`pnpm@${version}`)}`, 'corepack pnpm install --frozen-lockfile');
+        commands.push(`corepack install --global ${quote(`pnpm@${version}`)}`,
+          'mkdir -p /home/workload/.local/bin',
+          'corepack enable --install-directory /home/workload/.local/bin pnpm',
+          'corepack pnpm install --frozen-lockfile');
         note = spec ? 'packageManager respected' : 'pnpm fallback version selected from lockfile version';
       } else {
         const hasLock = exists(root, dir, 'package-lock.json') || exists(root, dir, 'npm-shrinkwrap.json');
