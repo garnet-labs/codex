@@ -316,32 +316,36 @@ function defaultTrust(repo, run) {
   return {repository, defaultTip: branch.commit.sha};
 }
 
-export function validateCIContext(env, event, repository, run, publishingRun) {
+export function validateCIContext(env, event, repository, run, publishingRun, {allowInProgress = false} = {}) {
   const repo = repository.full_name, ref = `refs/heads/${repository.default_branch}`;
-  check(env.GITHUB_ACTIONS === 'true' && env.GITHUB_EVENT_NAME === 'workflow_run' &&
+  check(env.GITHUB_ACTIONS === 'true' && env.GITHUB_EVENT_NAME === 'workflow_dispatch' &&
     env.GITHUB_REPOSITORY === repo && env.GITHUB_REPOSITORY_ID === String(repository.id) &&
     env.GITHUB_REF === ref && env.GITHUB_WORKFLOW_REF === `${repo}/${PUBLISH_WORKFLOW}@${ref}` &&
     SHA.test(env.GITHUB_SHA) && env.GITHUB_WORKFLOW_SHA === env.GITHUB_SHA,
   'untrusted_ci_publisher_context');
-  check(event.action === 'completed' && event.repository?.id === repository.id &&
-    event.repository?.full_name === repo && String(event.workflow_run?.id) === String(run.id) &&
-    event.workflow_run?.run_attempt === run.run_attempt && event.workflow_run?.head_sha === run.head_sha &&
-    event.workflow_run?.event === run.event && event.workflow_run?.head_branch === repository.default_branch &&
-    event.workflow_run?.head_repository?.id === repository.id && run.status === 'completed',
-  'ci_completed_run_event_mismatch');
+  // Dispatch inputs are lookup/binding targets, never authority. Every referenced
+  // run, attempt, source revision and artifact is independently checked live.
+  check(event.repository?.id === repository.id && event.repository?.full_name === repo &&
+    /^[1-9]\d{0,19}$/.test(event.inputs?.run_id || '') &&
+    String(event.inputs.run_id) === String(run.id) &&
+    /^[1-9]\d{0,5}$/.test(event.inputs?.run_attempt || '') &&
+    String(event.inputs.run_attempt) === String(run.run_attempt) &&
+    SHA.test(event.inputs?.worker_sha || '') && event.inputs.worker_sha === run.head_sha &&
+    (run.status === 'completed' || (allowInProgress && ['queued', 'in_progress'].includes(run.status))),
+  'ci_dispatch_run_binding_mismatch');
   check(String(publishingRun.id) === env.GITHUB_RUN_ID && publishingRun.path === PUBLISH_WORKFLOW &&
-    publishingRun.event === 'workflow_run' && publishingRun.head_sha === env.GITHUB_SHA &&
+    publishingRun.event === 'workflow_dispatch' && publishingRun.head_sha === env.GITHUB_SHA &&
     publishingRun.head_branch === repository.default_branch && publishingRun.repository?.id === repository.id &&
     publishingRun.head_repository?.id === repository.id, 'ci_publisher_run_mismatch');
 }
 
-export function authorizeCI(repo, runId) {
-  check(process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_EVENT_NAME === 'workflow_run' &&
-    /^[1-9]\d{0,19}$/.test(process.env.GITHUB_RUN_ID || ''), 'ci_mode_requires_workflow_run');
+export function authorizeCI(repo, runId, options) {
+  check(process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' &&
+    /^[1-9]\d{0,19}$/.test(process.env.GITHUB_RUN_ID || ''), 'ci_mode_requires_workflow_dispatch');
   const event = parse(read(process.env.GITHUB_EVENT_PATH, MB));
   const run = liveRun(repo, runId), trust = defaultTrust(repo, run);
   const publishingRun = api(`repos/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`);
-  validateCIContext(process.env, event, trust.repository, run, publishingRun);
+  validateCIContext(process.env, event, trust.repository, run, publishingRun, options);
   const workflow = api(`repos/${repo}/actions/workflows/${publishingRun.workflow_id}`);
   check(workflow.id === publishingRun.workflow_id && workflow.path === PUBLISH_WORKFLOW,
     'ci_publisher_workflow_identity_mismatch');
@@ -696,7 +700,7 @@ export function main(argv = process.argv.slice(2)) {
   }
   const preview = renderPreview({repo: o.repo, pr, run, snapshot, sides, failures, publishable: bound,
     artifacts, hostedReports, cloudReadbacks, historical: o.historical});
-  preview.provenance = {mode: o.ci ? 'trusted-workflow-run' : 'local-manager',
+  preview.provenance = {mode: o.ci ? 'trusted-workflow-dispatch' : 'local-manager',
     default_branch: trust.repository.default_branch, default_tip: trust.defaultTip,
     recorder_script_sha256: scriptHash, recorder_helpers_sha256: helperHashes};
   save(path.join(o.evidence, 'publisher-preview.md'), preview.comment.body);
