@@ -109,6 +109,30 @@ Search for breaking changes in external integration surfaces:
 - configuration loading
 - resuming sessions from existing rollouts
 
+### Runtime evidence
+
+CI records what the changed code actually executed: the Garnet Runtime Review
+comment on the PR lists every execution chain and outbound destination the
+recorded jobs produced, and `.garnet/evidence/actions.ndjson` holds the same
+record queryable through `.garnet/tools/query.py` (see `.garnet/AGENTS.md`).
+
+When reviewing a pull request, use the record like this:
+
+1. Use the Runtime Review comment only if it is for the PR's current head
+   commit. A missing, stale, or unreadable record means the runtime behavior is
+   undeterminable — say "no runtime evidence"; never treat that as a clean run.
+2. If the recorded execution chains and destinations are unchanged against the
+   comparison commit named in the comment, state that the recorded workload
+   shows no new behavior, and do not ask for manual runtime verification of the
+   recorded jobs.
+3. If the record shows a new or changed destination, name it, name the
+   execution chain that reached it, and require the PR description to explain
+   why the change reaches it. An unexplained new destination blocks approval.
+4. The record covers only the recorded jobs (`.garnet/coverage.md` lists which);
+   say nothing about the runtime behavior of jobs outside it.
+
+The record informs the review; it never approves a PR by itself.
+
 ### Test authoring guidance
 
 For agent changes prefer integration tests over unit tests. Integration tests are under `core/suite` and use `test_codex` to set up a test instance of codex.
