@@ -2478,7 +2478,6 @@ name = "codex-async-utils"
 version = "0.0.0"
 dependencies = [
  "pretty_assertions",
- "rand 0.9.3",
  "tokio",
  "tokio-util",
 ]
@@ -2697,7 +2696,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "codex-agent-identity",
- "codex-async-utils",
  "codex-backend-client",
  "codex-config",
  "codex-core",
@@ -4132,7 +4130,6 @@ dependencies = [
  "clap",
  "codex-utils-absolute-path",
  "codex-utils-home-dir",
- "codex-utils-path-uri",
  "codex-utils-rustls-provider",
  "codex-windows-sandbox",
  "globset",
