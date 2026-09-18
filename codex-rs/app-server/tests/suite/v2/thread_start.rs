@@ -325,7 +325,12 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
 
     let codex_home = TempDir::new()?;
-    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    create_config_toml(
+        codex_home.path(),
+        &server.uri(),
+        "sandbox_mode = \"read-only\"\nmodel_reasoning_effort = \"high\"",
+        "",
+    )?;
 
     // Start server and initialize.
     let mut mcp = TestAppServer::builder()
@@ -338,6 +343,7 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("gpt-5.2".to_string()),
             thread_source: Some(ThreadSource::User),
+            service_name: Some("codex_work_desktop".to_string()),
             ..Default::default()
         })
         .await?;
@@ -364,6 +370,10 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
         "new threads should start with an empty preview"
     );
     assert_eq!(model_provider, "mock_provider");
+    assert_eq!(
+        (thread.model.as_deref(), thread.reasoning_effort.clone()),
+        (Some("gpt-5.2"), Some(ReasoningEffort::High))
+    );
     assert!(
         thread.created_at > 0,
         "created_at should be a positive UNIX timestamp"
@@ -374,6 +384,7 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
     );
     assert_eq!(thread.status, ThreadStatus::Idle);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
+    assert_eq!(thread.originator.as_deref(), Some("codex_work_desktop"));
     let thread_path = thread.path.clone().expect("thread path should be present");
     assert!(thread_path.is_absolute(), "thread path should be absolute");
     assert!(
@@ -408,8 +419,8 @@ async fn thread_start_creates_thread_and_emits_started() -> Result<()> {
     );
     assert_eq!(
         thread_json.get("historyMode").and_then(Value::as_str),
-        Some("legacy"),
-        "new threads should serialize `historyMode: legacy`"
+        Some("paginated"),
+        "durable threads should default to `historyMode: paginated` when supported"
     );
     assert_eq!(
         thread_json.get("threadSource").and_then(Value::as_str),
@@ -1097,6 +1108,7 @@ async fn thread_start_ephemeral_remains_pathless() -> Result<()> {
         thread.ephemeral,
         "ephemeral threads should be marked explicitly"
     );
+    assert_eq!(thread.history_mode, ThreadHistoryMode::Legacy);
     assert_eq!(
         thread.path, None,
         "ephemeral threads should not expose a path"
@@ -1205,9 +1217,7 @@ async fn thread_start_fails_when_managed_hook_handler_is_unsupported() -> Result
 matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
-type = "mcp_tool"
-server = "security"
-tool = "scan"
+type = "prompt"
 "#,
     )?;
 
@@ -1225,10 +1235,42 @@ tool = "scan"
     .await??;
 
     assert!(
-        error.error.message.contains("MCP tool hook"),
+        error.error.message.contains("prompt hook"),
         "unexpected error message: {}",
         error.error.message
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_start_succeeds_when_managed_mcp_hook_is_supported() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    std::fs::write(
+        codex_home.path().join("requirements.toml"),
+        r#"[hooks]
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "mcp_tool"
+server = "security"
+tool = "scan"
+"#,
+    )?;
+
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let response = app_server
+        .start_thread(ThreadStartParams::default())
+        .await?;
+
+    assert!(!response.thread.id.is_empty());
 
     Ok(())
 }
@@ -1610,8 +1652,9 @@ async fn thread_start_with_nested_git_cwd_respects_effective_permissions_for_pro
 
     let repo_root = TempDir::new()?;
     std::fs::create_dir(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     let nested = repo_root.path().join("nested/project");
-    std::fs::create_dir_all(&nested)?;
+    std::fs::create_dir_all(nested.join(".git"))?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1651,6 +1694,50 @@ async fn thread_start_with_nested_git_cwd_respects_effective_permissions_for_pro
 }
 
 #[tokio::test]
+async fn thread_start_projectless_does_not_preapprove_later_project_config() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
+    let workspace = TempDir::new()?;
+    let config_path = codex_home.path().join("config.toml");
+    let config_before = std::fs::read_to_string(&config_path)?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let response = mcp
+        .start_thread(ThreadStartParams {
+            cwd: Some(workspace.path().display().to_string()),
+            sandbox: Some(SandboxMode::DangerFullAccess),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(
+        response.sandbox,
+        codex_app_server_protocol::SandboxPolicy::DangerFullAccess
+    );
+    assert_eq!(std::fs::read_to_string(&config_path)?, config_before);
+
+    let project_config_dir = workspace.path().join(".codex");
+    std::fs::create_dir(&project_config_dir)?;
+    std::fs::write(
+        project_config_dir.join("config.toml"),
+        "model_reasoning_effort = \"high\"\n",
+    )?;
+    let response = mcp
+        .start_thread(ThreadStartParams {
+            cwd: Some(workspace.path().display().to_string()),
+            sandbox: Some(SandboxMode::ReadOnly),
+            ..Default::default()
+        })
+        .await?;
+    assert_eq!(response.reasoning_effort, None);
+    assert_eq!(std::fs::read_to_string(&config_path)?, config_before);
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_start_with_read_only_sandbox_does_not_persist_project_trust() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
 
@@ -1658,6 +1745,7 @@ async fn thread_start_with_read_only_sandbox_does_not_persist_project_trust() ->
     create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
 
     let workspace = TempDir::new()?;
+    std::fs::create_dir(workspace.path().join(".codex"))?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1685,6 +1773,7 @@ async fn thread_start_preserves_untrusted_project_trust() -> Result<()> {
     create_config_toml_without_approval_policy(codex_home.path(), &server.uri())?;
 
     let workspace = TempDir::new()?;
+    std::fs::create_dir(workspace.path().join(".codex"))?;
     let config_path = codex_home.path().join("config.toml");
     let workspace_key = workspace.path().display().to_string();
     let mut config_toml =
@@ -1808,6 +1897,11 @@ fn create_config_toml_with_profile_workspace_root(
             r#"
 [permissions.dev.workspace_roots]
 "{profile_root_key}" = true
+
+# This test only exercises workspace roots; Windows restricted-token sandboxes
+# cannot enforce a filesystem policy without root read access.
+[permissions.dev.filesystem]
+":root" = "read"
 
 [permissions.dev.filesystem.":workspace_roots"]
 "." = "write"

@@ -2,11 +2,14 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 
+use codex_exec_server::Environment;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_extension_api::ExtensionMetrics;
+use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
-use codex_mcp::McpResourceClientCacheKey;
+use codex_mcp::McpResourceServerCacheKey;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use tokio::sync::OnceCell;
 
@@ -41,6 +44,7 @@ pub(crate) struct SkillsThreadState {
     executor_discovery_cache: Mutex<Option<CachedExecutorDiscoveryCatalog>>,
     orchestrator_cache: Mutex<Option<Arc<OrchestratorGenerationCache>>>,
     shadow_selection_turn: Mutex<Option<ShadowSelectionTurn>>,
+    pub(crate) executor_read_snapshot: Mutex<Option<ExecutorReadSnapshot>>,
     pub(crate) recent_skill_invocations: Arc<RecentSkillInvocations>,
     pub(crate) shadow_task_context: Arc<ShadowTaskContext>,
 }
@@ -54,6 +58,7 @@ impl SkillsThreadState {
             executor_discovery_cache: Mutex::new(None),
             orchestrator_cache: Mutex::new(None),
             shadow_selection_turn: Mutex::new(None),
+            executor_read_snapshot: Mutex::new(None),
             recent_skill_invocations: Arc::new(RecentSkillInvocations::default()),
             shadow_task_context: Arc::new(ShadowTaskContext::default()),
         }
@@ -218,7 +223,7 @@ impl SkillsThreadState {
     pub(crate) async fn read_skill(
         &self,
         providers: &SkillProviders,
-        request: SkillReadRequest,
+        request: SkillReadRequest<'_>,
     ) -> SkillProviderResult<SkillReadResult> {
         if request.authority.kind != SkillSourceKind::Orchestrator {
             return providers.read(request).await;
@@ -255,7 +260,8 @@ impl SkillsThreadState {
             .orchestrator_cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cache_key = mcp_resources.map(McpResourceClient::cache_key);
+        let cache_key =
+            mcp_resources.and_then(|client| client.server_cache_key(CODEX_APPS_MCP_SERVER_NAME));
         if let Some(cache) = cache
             .as_ref()
             .filter(|cache| cache.mcp_cache_key == cache_key)
@@ -305,6 +311,17 @@ impl SkillsThreadState {
     }
 }
 
+/// One bounded executor resource, retained for continuations until replacement or thread drop.
+/// Interleaved resources may evict it; misses reread and validate the content-bound cursor.
+pub(crate) struct ExecutorReadSnapshot {
+    pub(crate) authority: SkillAuthority,
+    pub(crate) package: SkillPackageId,
+    // Named environments can be replaced; do not reuse their old resource or keep them alive.
+    pub(crate) environment: Weak<Environment>,
+    pub(crate) sandbox: Option<FileSystemSandboxContext>,
+    pub(crate) result: Arc<SkillReadResult>,
+}
+
 struct ShadowSelectionTurn {
     turn_id: String,
     state: Arc<ShadowSelectionTurnState>,
@@ -322,7 +339,7 @@ struct CachedExecutorDiscoveryCatalog {
 }
 
 struct OrchestratorGenerationCache {
-    mcp_cache_key: Option<McpResourceClientCacheKey>,
+    mcp_cache_key: Option<McpResourceServerCacheKey>,
     catalog: OnceCell<SkillCatalog>,
     resources: Mutex<OrchestratorResourceCache>,
 }
@@ -334,8 +351,8 @@ struct SkillReadCacheKey {
     resource: SkillResourceId,
 }
 
-impl From<&SkillReadRequest> for SkillReadCacheKey {
-    fn from(request: &SkillReadRequest) -> Self {
+impl From<&SkillReadRequest<'_>> for SkillReadCacheKey {
+    fn from(request: &SkillReadRequest<'_>) -> Self {
         Self {
             authority: request.authority.clone(),
             package: request.package.clone(),

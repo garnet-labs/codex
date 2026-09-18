@@ -23,7 +23,7 @@ pub(super) async fn unarchive_thread(
     let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
     // Archive, delete, and revert use the same cross-process lock while moving or selecting
     // rollout files. Unarchive must participate before it moves those files back.
-    let _writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
+    let _writer_lock = store.acquire_writer_lock(thread_id)?;
     let state_db_ctx = store.state_db().await;
     let selected_archived_path =
         thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
@@ -76,7 +76,12 @@ pub(super) async fn unarchive_thread(
         if rollout_path == selected_archived_path {
             restored_path = Some(destination.clone());
         }
-        rollout_moves.push((canonical_archived_path, destination));
+        if !rollout_moves
+            .iter()
+            .any(|(source, _)| source == &canonical_archived_path)
+        {
+            rollout_moves.push((canonical_archived_path, destination));
+        }
     }
     let restored_path = restored_path.ok_or_else(|| ThreadStoreError::Internal {
         message: format!("failed to unarchive selected rollout for thread {thread_id}"),
@@ -193,8 +198,7 @@ mod tests {
         let archived_path = write_archived_session_file(home.path(), "2025-01-03T13-00-00", uuid)
             .expect("archived session file");
         let writer_guard = owner
-            .writer_lock_coordinator
-            .acquire(thread_id)
+            .acquire_writer_lock(thread_id)
             .expect("acquire writer lock");
 
         let error = store
@@ -212,13 +216,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unarchive_thread_updates_sqlite_metadata_when_present() {
+    async fn unarchive_thread_deduplicates_rollout_paths_and_updates_sqlite_metadata() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
         let uuid = Uuid::from_u128(204);
         let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
         let archived_path = write_archived_session_file(home.path(), "2025-01-03T13-00-00", uuid)
             .expect("archived session file");
+        let alternate_directory = archived_path
+            .parent()
+            .expect("archived session directory")
+            .join("alternate");
+        std::fs::create_dir(&alternate_directory).expect("alternate archived session directory");
+        let selected_archived_path = alternate_directory
+            .join("..")
+            .join(archived_path.file_name().expect("file name"));
         let runtime = codex_state::StateRuntime::init(
             codex_state::SqliteConfig::new_for_testing(home.path().abs()),
             config.default_model_provider_id.clone(),
@@ -232,7 +244,7 @@ mod tests {
             .expect("backfill should be complete");
         let mut builder = codex_state::ThreadMetadataBuilder::new(
             thread_id,
-            archived_path.clone(),
+            selected_archived_path,
             Utc::now(),
             SessionSource::Cli,
         );

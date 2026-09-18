@@ -48,13 +48,12 @@ pub enum HistoryLineWrapPolicy {
 
 /// Selects the terminal escape strategy used when writing history above the viewport.
 ///
-/// Raw lines intentionally remain unbroken so terminal selection copies their source faithfully.
-/// Zellij does not constrain soft-wrapped continuation rows to Codex's scroll region, so its raw
-/// path appends history through the terminal and reserves blank rows for the next viewport draw.
+/// Full-screen insertion preserves terminal-native scrollback when partial scroll regions are
+/// unreliable and keeps terminal-managed soft wrapping intact for Zellij.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InsertHistoryMode {
     Standard,
-    ZellijRaw,
+    FullScreen,
 }
 
 /// Insert `lines` above the viewport using the terminal's backend writer
@@ -133,7 +132,7 @@ where
     let (wrapped, wrapped_rows) = wrap_history_hyperlink_lines(lines, wrap_width, wrap_policy);
     let wrapped_lines = wrapped_rows as u16;
     match mode {
-        InsertHistoryMode::ZellijRaw => {
+        InsertHistoryMode::FullScreen => {
             // The existing viewport is immediately replaced in the same draw pass. Clear it
             // before terminal scrolling can move composer contents into scrollback.
             terminal.clear_after_position(area.as_position())?;
@@ -541,6 +540,55 @@ mod tests {
     }
 
     #[test]
+    fn markdown_link_label_survives_history_wrapping() {
+        use pretty_assertions::assert_eq;
+
+        let destination = "https://developers.openai.com/";
+        let markdown = "Instead of a Markdown-labeled link. That is the most reliably clickable form. Official OpenAI documentation does not appear to document this exact terminal-link behavior; this is an inference from how terminal hyperlink rendering works. [OpenAI Developers](https://developers.openai.com/)";
+        for label in ["OpenAI Developers", "`OpenAI Developers`"] {
+            for markdown in [
+                markdown.replace("[OpenAI Developers]", &format!("[{label}]")),
+                format!("| Link |\n| --- |\n| [{label}]({destination}) |"),
+            ] {
+                for width in [32, 80, 200] {
+                    let lines = crate::markdown::render_markdown_agent_with_links_and_cwd(
+                        &markdown,
+                        Some(width),
+                        /*cwd*/ None,
+                    );
+                    let lines = crate::terminal_hyperlinks::prefix_hyperlink_lines(
+                        lines,
+                        "  ".into(),
+                        "  ".into(),
+                    );
+                    let (wrapped, _) = wrap_history_hyperlink_lines(
+                        &lines,
+                        width + 2,
+                        HistoryLineWrapPolicy::PreWrap,
+                    );
+                    let mut actual = Vec::new();
+                    for line in &wrapped {
+                        write_history_line(&mut actual, line, width + 2)
+                            .expect("write history line");
+                    }
+                    let output = String::from_utf8(actual).expect("UTF-8 terminal output");
+                    let open = format!("\x1b]8;;{destination}\x07");
+                    let linked_text = output
+                        .split(&open)
+                        .skip(1)
+                        .map(|part| part.split("\x1b]8;;\x07").next().unwrap())
+                        .collect::<String>();
+                    assert_eq!(
+                        linked_text.replace(' ', ""),
+                        format!("OpenAIDevelopers{destination}"),
+                        "label {label}, width {width}: {wrapped:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn vt100_blockquote_line_emits_green_fg() {
         // Set up a small off-screen terminal
         let width: u16 = 40;
@@ -822,6 +870,7 @@ mod tests {
 
         let url = "https://example.test/forwarded/threads/10930?page=1&queue=customer_support_unprocessed&forwardedScope=all";
         let cell = UserHistoryCell {
+            spoken: false,
             message: url.to_string(),
             text_elements: Vec::new(),
             local_image_paths: Vec::new(),
@@ -1033,7 +1082,7 @@ mod tests {
         insert_history_lines_with_mode_and_wrap_policy(
             &mut term,
             vec![line],
-            InsertHistoryMode::ZellijRaw,
+            InsertHistoryMode::FullScreen,
             HistoryLineWrapPolicy::Terminal,
         )
         .expect("insert Zellij raw history");
@@ -1069,7 +1118,7 @@ mod tests {
         insert_history_lines_with_mode_and_wrap_policy(
             &mut term,
             vec![line],
-            InsertHistoryMode::ZellijRaw,
+            InsertHistoryMode::FullScreen,
             HistoryLineWrapPolicy::Terminal,
         )
         .expect("replay Zellij raw history");

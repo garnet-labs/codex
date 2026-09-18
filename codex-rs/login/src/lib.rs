@@ -2,9 +2,15 @@ pub mod auth;
 pub mod auth_env_telemetry;
 pub mod test_support;
 pub mod token_data;
+pub use auth::WorkspaceRouting;
+pub use auth::WorkspaceRoutingRequest;
+pub use auth::WorkspaceRoutingResolver;
+pub use auth::WorkspaceRoutingSession;
 
 mod callback_params;
 mod device_code_auth;
+mod gateway_auth;
+mod oauth;
 mod outbound_proxy;
 mod pkce;
 mod server;
@@ -27,6 +33,7 @@ pub use success_page::LoginSuccessPage;
 pub use success_page::LoginSuccessPageBrand;
 
 pub use auth::AgentIdentityAuthPolicy;
+pub use auth::AuthChangeState;
 pub use auth::AuthConfig;
 pub use auth::AuthDotJson;
 pub use auth::AuthHeaders;
@@ -54,6 +61,7 @@ pub use auth::is_workload_identity_selected;
 pub use auth::load_auth_dot_json;
 pub use auth::login_with_access_token;
 pub use auth::login_with_api_key;
+pub use auth::login_with_bedrock_access_keys;
 pub use auth::login_with_bedrock_api_key;
 pub use auth::logout;
 pub use auth::logout_with_revoke;
@@ -65,3 +73,6 @@ pub use auth_env_telemetry::AuthEnvTelemetry;
 pub use auth_env_telemetry::collect_auth_env_telemetry;
 pub use outbound_proxy::AuthRouteConfig;
 pub use token_data::TokenData;
+
+pub use gateway_auth::GatewayAuthConfig;
+pub use gateway_auth::GatewayAuthManager;

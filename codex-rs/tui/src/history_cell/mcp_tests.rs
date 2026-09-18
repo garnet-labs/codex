@@ -7,12 +7,264 @@ use serde_json::json;
 
 const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
+#[test]
+fn mcp_inventory_connection_states() {
+    use McpServerConnectionStatus as Status;
+
+    let statuses = [
+        ("unknown", None),
+        ("starting", Some(Status::Starting)),
+        ("failed", Some(Status::Failed)),
+        ("disabled", Some(Status::Disabled)),
+        ("deferred", Some(Status::NotStarted)),
+        ("connected-empty", Some(Status::Connected)),
+        ("cancelled", Some(Status::Cancelled)),
+        ("auth", Some(Status::AuthenticationRequired)),
+    ]
+    .into_iter()
+    .map(|(name, runtime_status)| McpServerStatus {
+        server_capabilities: None,
+        name: name.to_string(),
+        runtime_status,
+        plugin_id: None,
+        server_info: None,
+        tools: HashMap::new(),
+        tools_error: None,
+        resources: Vec::new(),
+        resource_templates: Vec::new(),
+        auth_status: McpAuthStatus::Unknown,
+    })
+    .collect::<Vec<_>>();
+    let cell =
+        new_mcp_tools_output_from_statuses(&statuses, McpServerStatusDetail::ToolsAndAuthOnly);
+    let rendered = cell
+        .display_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(rendered);
+    for (name, expected) in [
+        ("auth", status_style(StatusTone::Attention)),
+        ("cancelled", Style::default().dim()),
+        ("connected-empty", status_style(StatusTone::Success)),
+        ("deferred", Style::default().dim()),
+        ("disabled", Style::default().dim()),
+        ("failed", status_style(StatusTone::Failure)),
+        ("starting", accent_style()),
+        ("unknown", Style::default().dim()),
+    ] {
+        let row = cell
+            .lines
+            .iter()
+            .find(|line| line.spans.get(1).is_some_and(|span| span.content == name))
+            .expect("connection-state row");
+        assert_eq!(
+            (row.spans[0].style, row.spans[3].style),
+            (expected, expected)
+        );
+    }
+}
+
+#[test]
+fn mcp_inventory_older_app_server_authentication() {
+    let statuses = serde_json::from_value::<Vec<McpServerStatus>>(json!([
+        {
+            "name": "legacy-auth",
+            "tools": {},
+            "resources": [],
+            "resourceTemplates": [],
+            "authStatus": "notLoggedIn"
+        },
+        {
+            "name": "legacy-healthy",
+            "tools": {"lookup": {"name": "lookup", "inputSchema": {"type": "object"}}},
+            "resources": [],
+            "resourceTemplates": [],
+            "authStatus": "oAuth"
+        },
+        {
+            "name": "runtime-disabled",
+            "runtimeStatus": "disabled",
+            "tools": {},
+            "resources": [],
+            "resourceTemplates": [],
+            "authStatus": "notLoggedIn"
+        }
+    ]))
+    .expect("mixed-version MCP statuses");
+    let cell =
+        new_mcp_tools_output_from_statuses(&statuses, McpServerStatusDetail::ToolsAndAuthOnly);
+    let rendered = cell
+        .display_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(rendered);
+    let styles = cell
+        .lines
+        .iter()
+        .filter(|line| {
+            line.spans
+                .get(1)
+                .is_some_and(|span| statuses.iter().any(|status| span.content == status.name))
+        })
+        .map(|line| (line.spans[0].style, line.spans[3].style))
+        .collect::<Vec<_>>();
+    let attention = status_style(StatusTone::Attention);
+    let neutral = Style::default().dim();
+    assert_eq!(
+        styles,
+        vec![
+            (attention, attention),
+            (neutral, neutral),
+            (neutral, neutral)
+        ]
+    );
+}
+
 fn result(content: Vec<Value>) -> CallToolResult {
     CallToolResult {
         content,
         structured_content: None,
         is_error: None,
         meta: None,
+    }
+}
+
+#[test]
+fn code_mode_output_shares_a_row_budget_across_blocks() {
+    let mut cell = new_active_mcp_tool_call(
+        "browser-call".to_string(),
+        McpInvocation {
+            server: "node_repl".to_string(),
+            tool: "js".to_string(),
+            arguments: Some(json!({"title": "Inspect page", "code": "await tab.snapshot()"})),
+        },
+        /*animations_enabled*/ false,
+    );
+    cell.complete(
+        Duration::ZERO,
+        Ok(result(vec![
+            json!({"type": "text", "text": "Script completed\nOutput:\n"}),
+            json!({"type": "text", "text": "Page title\nNavigation\nMain content"}),
+            json!({"type": "text", "text": "Button\nLink\nFooter"}),
+        ])),
+    );
+
+    let display = cell
+        .display_lines(/*width*/ 40)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(display, @"
+    • Inspect page
+      └ Page title
+        Navigation
+        … more · ctrl+t
+        Link
+        Footer
+    ");
+    let transcript = cell
+        .transcript_lines(/*width*/ 100)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(transcript.contains("await tab.snapshot()"));
+    assert!(transcript.ends_with("    Button\n    Link\n    Footer"));
+}
+
+#[test]
+fn code_mode_output_keeps_trailing_failure_diagnostics() {
+    let mut cell = new_active_mcp_tool_call(
+        "browser-error".to_string(),
+        McpInvocation {
+            server: "node_repl".to_string(),
+            tool: "js".to_string(),
+            arguments: Some(json!({"title": "Inspect page"})),
+        },
+        /*animations_enabled*/ false,
+    );
+    cell.complete(
+        Duration::ZERO,
+        Ok(CallToolResult {
+            is_error: Some(true),
+            ..result(vec![
+                json!({"type": "text", "text": "Script failed"}),
+                json!({"type": "text", "text": "Page title\nNavigation\nMain content\nButton\nLink\nFooter"}),
+                json!({"type": "text", "text": "Script error:\npermission denied"}),
+            ])
+        }),
+    );
+    let display = cell
+        .display_lines(/*width*/ 40)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(display, @"
+    • Inspect page
+      └ Script failed
+        Page title
+        … more · ctrl+t
+        Script error:
+        permission denied
+    ");
+}
+
+#[test]
+fn code_mode_output_row_budget_applies_after_wrapping_and_to_errors() {
+    let output = format!("{}\ntranscript tail", "Browser 页面 👩‍💻\n".repeat(40));
+    for server in ["node_repl", "cua_repl"] {
+        for completion in [
+            Ok(result(vec![json!({"type": "text", "text": output})])),
+            Ok(result(vec![json!({
+                "type": "text",
+                "text": format!("https://example.com/{}\ntranscript tail", "页面".repeat(100)),
+            })])),
+            Ok(CallToolResult {
+                is_error: Some(true),
+                ..result(vec![json!({"type": "text", "text": output})])
+            }),
+            Err(output.clone()),
+        ] {
+            let mut cell = new_active_mcp_tool_call(
+                "browser-call".to_string(),
+                McpInvocation {
+                    server: server.to_string(),
+                    tool: "js".to_string(),
+                    arguments: Some(json!({"title": "Inspect"})),
+                },
+                /*animations_enabled*/ false,
+            );
+            cell.complete(Duration::ZERO, completion);
+            for width in [20, 40, 80] {
+                let display = cell.display_lines(width);
+                assert_eq!(display.len(), 1 + TOOL_CALL_MAX_LINES);
+                assert!(
+                    display
+                        .iter()
+                        .all(|line| line.width() <= usize::from(width))
+                );
+                assert_eq!(display[3].to_string(), "    … more · ctrl+t");
+                let transcript = cell
+                    .transcript_lines(width)
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    transcript
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .contains("transcript tail")
+                );
+            }
+        }
     }
 }
 
@@ -49,7 +301,7 @@ fn projected_content_preserves_width_dependent_rendering() {
                 .collect::<Vec<_>>(),
             vec![
                 format_text(text),
-                "<image content>".to_string(),
+                "Returned image".to_string(),
                 "<audio content>".to_string(),
                 "embedded resource: file:///text.txt".to_string(),
                 "embedded resource: file:///blob.bin".to_string(),
@@ -73,7 +325,7 @@ fn projected_image_marker_still_requires_a_complete_image() {
 
     let projected = McpToolResult::new(result(vec![invalid.clone()]), McpResultKind::Standard);
     assert!(!projected.has_image);
-    assert_eq!(projected.content[0].render(/*width*/ 80), "<image content>");
+    assert_eq!(projected.content[0].render(/*width*/ 80), "Returned image");
 
     let projected = McpToolResult::new(result(vec![invalid, valid]), McpResultKind::Standard);
     assert!(projected.has_image);
@@ -92,12 +344,22 @@ fn code_mode_preserves_text_fields_on_nontext_and_unknown_blocks() {
     );
     let unknown =
         json!({"type": "future_block", "text": "Script completed\nOutput:\nunknown-side output"});
-    cell.complete(
-        Duration::ZERO,
-        Ok(result(vec![
-            json!({"type": "image", "mimeType": "image/png", "data": PNG, "text": "Script completed\nOutput:\nimage-side output"}),
-            unknown.clone(),
-        ])),
+    let tool_result = result(vec![
+        json!({"type": "image", "mimeType": "image/png", "data": PNG, "text": "Script completed\nOutput:\nimage-side output"}),
+        unknown.clone(),
+    ]);
+    cell.complete(Duration::ZERO, Ok(tool_result.clone()));
+
+    let narrow = cell.display_lines(/*width*/ 16);
+    assert!(narrow.iter().all(|line| line.width() <= 16));
+    assert_eq!(
+        narrow
+            .iter()
+            .skip(1)
+            .take(2)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        vec!["  └ Returned", "    image"],
     );
 
     let display = cell
@@ -114,13 +376,15 @@ fn code_mode_preserves_text_fields_on_nontext_and_unknown_blocks() {
         .join("\n");
     insta::assert_snapshot!(format!("history:\n{display}\n\ntranscript:\n{transcript}"), @r#"
     history:
-    • Called Inspect results
-      └ image-side output
+    • Inspect results
+      └ Returned image
+        image-side output
         unknown-side output
 
     transcript:
     • Called node_repl.js({"title":"Inspect results"})
-      └ Script completed
+      └ Returned image
+        Script completed
         Output:
         image-side output
         Script completed
@@ -131,12 +395,96 @@ fn code_mode_preserves_text_fields_on_nontext_and_unknown_blocks() {
         cell.raw_lines(),
         vec![
             Line::from("Called node_repl.js({\"title\":\"Inspect results\"})"),
-            Line::from("<image content>"),
+            Line::from("Returned image"),
             Line::from(format_and_truncate_tool_result(
                 &unknown.to_string(),
                 TOOL_CALL_MAX_LINES,
                 RAW_TOOL_OUTPUT_WIDTH,
             )),
         ],
+    );
+
+    let mut cua_cell = new_active_mcp_tool_call(
+        "call-cua-repl".to_string(),
+        McpInvocation {
+            server: "cua_repl".to_string(),
+            tool: "js".to_string(),
+            arguments: None,
+        },
+        /*animations_enabled*/ false,
+    );
+    cua_cell.complete(Duration::ZERO, Ok(tool_result));
+    let display = cua_cell
+        .display_lines(/*width*/ 200)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let transcript = cua_cell
+        .transcript_lines(/*width*/ 200)
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(format!("history:\n{display}\n\ntranscript:\n{transcript}"), @r"
+    history:
+    • Called cua_repl.js
+      └ Returned image
+        image-side output
+        unknown-side output
+
+    transcript:
+    • Called cua_repl.js()
+      └ Returned image
+        Script completed
+        Output:
+        image-side output
+        Script completed
+        Output:
+        unknown-side output
+    ");
+}
+
+#[test]
+fn titled_image_call_keeps_error_and_full_title_when_narrow() {
+    let title = "Inspect a very long screenshot title 🦀";
+    let mut cell = new_active_mcp_tool_call(
+        "call".into(),
+        McpInvocation {
+            server: "node_repl".into(),
+            tool: "js".into(),
+            arguments: Some(json!({"title": title})),
+        },
+        /*animations_enabled*/ false,
+    );
+    assert_eq!(
+        cell.display_lines(/*width*/ 80)[0].to_string(),
+        format!("• {title}")
+    );
+    cell.complete(
+        Duration::ZERO,
+        Ok(CallToolResult {
+            is_error: Some(true),
+            ..result(vec![
+                json!({"type": "text", "text": "Screenshot partially failed"}),
+                json!({"type": "image", "mimeType": "image/png", "data": PNG}),
+            ])
+        }),
+    );
+    let lines = cell.display_lines(/*width*/ 32);
+    assert!(lines[0].width() <= 32);
+    assert_eq!(lines[0].spans[0].style, "•".red().bold().style);
+    insta::assert_snapshot!(
+        lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(cell.raw_lines()[0].to_string().contains(title));
+    assert!(
+        cell.transcript_lines(/*width*/ 200)[0]
+            .to_string()
+            .contains(title)
     );
 }

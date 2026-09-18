@@ -13,9 +13,10 @@ use crate::tools::sandboxing::Sandboxable;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
-use crate::tools::sandboxing::executor_windows_sandbox_level;
+use crate::tools::sandboxing::executor_windows_sandbox_selection;
 use codex_apply_patch::AppliedPatchDelta;
 use codex_apply_patch::ApplyPatchAction;
+use codex_apply_patch::ApplyPatchOptions;
 use codex_exec_server::FileSystemSandboxContext;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
@@ -96,10 +97,13 @@ impl ApplyPatchRuntime {
             req.additional_permissions.as_ref(),
         );
         Some(FileSystemSandboxContext {
-            permissions: permissions.into(),
-            cwd: Some(attempt.sandbox_cwd.clone()),
+            permissions,
+            cwd: attempt.sandbox_cwd.clone(),
             workspace_roots: attempt.workspace_roots.to_vec(),
-            windows_sandbox_level: executor_windows_sandbox_level(
+            user_home_dir: req.turn_environment.user_home_dir.clone(),
+            temporary_directories: None,
+            windows_sandbox_selection: executor_windows_sandbox_selection(
+                attempt.windows_sandbox_type,
                 attempt.windows_sandbox_level,
                 attempt.sandbox_cwd,
             ),
@@ -173,9 +177,19 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
         let sandbox = Self::file_system_sandbox_context_for_attempt(req, attempt);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let result = codex_apply_patch::apply_patch_with_mode(
+        let result = codex_apply_patch::apply_patch_with_options(
             &req.action.patch,
-            req.action.update_file_mode(),
+            ApplyPatchOptions {
+                update_file_mode: req.action.update_file_mode(),
+                // Only reject links when an otherwise-required sandbox was bypassed.
+                // Executor-managed sandboxes can have SandboxType::None.
+                follow_symlinks: attempt.sandbox_requested
+                    || !attempt.manager.should_sandbox(
+                        attempt.permissions,
+                        self.sandbox_preference(),
+                        attempt.enforce_managed_network,
+                    ),
+            },
             &req.action.cwd,
             &mut stdout,
             &mut stderr,

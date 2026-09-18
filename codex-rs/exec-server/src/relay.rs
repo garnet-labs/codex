@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use codex_exec_server_protocol::JSONRPCMessage;
@@ -11,6 +12,7 @@ use prost::Message as ProstMessage;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::debug;
@@ -32,13 +34,16 @@ use crate::noise_relay::NOISE_RELAY_RESET_REASON;
 use crate::noise_relay::executor_stream::ClosedNoiseVirtualStream;
 use crate::noise_relay::executor_stream::NoiseVirtualStream;
 use crate::noise_relay::executor_stream::spawn_noise_virtual_stream;
+use crate::noise_relay::stream_handler::NoiseStreamHandler;
 use crate::relay_proto::RelayData;
 use crate::relay_proto::RelayHandshake;
 use crate::relay_proto::RelayMessageFrame;
 use crate::relay_proto::RelayReset;
 use crate::relay_proto::RelayResume;
 use crate::relay_proto::relay_message_frame;
+#[cfg(test)]
 use crate::server::ConnectionProcessor;
+use crate::telemetry::ExecutorRegistration;
 use crate::websocket_pong_watchdog::WEBSOCKET_PONG_TIMEOUT;
 use crate::websocket_pong_watchdog::WEBSOCKET_PONG_TIMEOUT_REASON;
 use crate::websocket_pong_watchdog::WebSocketPongWatchdog;
@@ -46,6 +51,7 @@ use crate::websocket_pong_watchdog::WebSocketPongWatchdog;
 const RELAY_MESSAGE_FRAME_VERSION: u32 = 1;
 const MAX_ACTIVE_NOISE_RELAY_STREAMS: usize = 128;
 const MAX_FAILED_NOISE_HANDSHAKES: usize = 8;
+const NOISE_HANDSHAKE_FAILURE_COOLDOWN: Duration = Duration::from_secs(10);
 const MAX_HARNESS_KEY_AUTHORIZATION_BYTES: usize = 4096;
 const MAX_PENDING_HANDSHAKE_VALIDATIONS: usize = 32;
 const HARNESS_KEY_VALIDATION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -475,9 +481,9 @@ pub(crate) trait HarnessKeyValidator: Send + Sync {
 /// Parsing the first Noise message authenticates the harness key. Only a
 /// successful registry check turns that pending handshake into a virtual stream.
 #[tracing::instrument(level = "debug", skip_all, fields(noise_side = "executor"))]
-pub(crate) async fn run_multiplexed_environment<T, E, V>(
+pub(crate) async fn run_multiplexed_environment<T, E, V, H>(
     stream: T,
-    processor: ConnectionProcessor,
+    handler: H,
     environment_id: String,
     executor_registration_id: String,
     identity: NoiseChannelIdentity,
@@ -487,11 +493,15 @@ where
     T: Sink<Message, Error = E> + Stream<Item = Result<Message, E>> + Unpin + Send + 'static,
     E: std::fmt::Display + Send + 'static,
     V: HarnessKeyValidator + Clone + 'static,
+    H: NoiseStreamHandler,
 {
     debug!(
         environment_id,
         executor_registration_id, "Noise executor relay details"
     );
+    let executor_registration =
+        ExecutorRegistration::new(environment_id.clone(), executor_registration_id.clone())
+            .map(Arc::new);
     let (mut websocket_sink, mut websocket_stream) = stream.split();
     let (physical_outgoing_tx, mut physical_outgoing_rx) =
         mpsc::channel::<Vec<u8>>(CHANNEL_CAPACITY);
@@ -563,10 +573,11 @@ where
             }
         }
     });
-    let mut streams: HashMap<String, NoiseVirtualStream> = HashMap::new();
+    let mut streams: HashMap<String, NoiseVirtualStream<H>> = HashMap::new();
     let mut pending_handshakes: HashMap<String, PendingHandshake> = HashMap::new();
     let mut validation_tasks: JoinSet<HarnessKeyValidationResult> = JoinSet::new();
     let mut failed_handshakes = 0usize;
+    let mut handshake_cooldown_until = None;
     let mut next_validation_id = 0u64;
     let mut disconnect_reason = RendezvousDisconnectReason::LocalShutdown;
 
@@ -591,6 +602,7 @@ where
                     .is_some_and(|stream| stream.instance_id == closed_stream.instance_id);
                 if is_current {
                     streams.remove(&closed_stream.stream_id);
+                    send_reset(&physical_outgoing_tx, closed_stream.stream_id);
                 }
                 continue;
             }
@@ -624,10 +636,10 @@ where
                                 "Noise harness authorization failure details"
                             );
                             send_reset(&physical_outgoing_tx, validation_result.stream_id);
-                            if failed_handshake_budget_exhausted(&mut failed_handshakes) {
-                                warn!("closing Noise relay after repeated handshake failures");
-                                break;
-                            }
+                            record_failed_handshake(
+                                &mut failed_handshakes,
+                                &mut handshake_cooldown_until,
+                            );
                             continue;
                         }
                         if streams.len() >= MAX_ACTIVE_NOISE_RELAY_STREAMS {
@@ -644,10 +656,10 @@ where
                             Err(error) => {
                                 warn!("failed to complete Noise relay handshake: {error}");
                                 send_reset(&physical_outgoing_tx, validation_result.stream_id);
-                                if failed_handshake_budget_exhausted(&mut failed_handshakes) {
-                                    warn!("closing Noise relay after repeated handshake failures");
-                                    break;
-                                }
+                                record_failed_handshake(
+                                    &mut failed_handshakes,
+                                    &mut handshake_cooldown_until,
+                                );
                                 continue;
                             }
                         };
@@ -678,10 +690,11 @@ where
                             spawn_noise_virtual_stream(
                                 validation_result.stream_id,
                                 validation_result.validation_id,
-                                processor.clone(),
+                                handler.clone(),
                                 physical_outgoing_tx.clone(),
                                 closed_stream_tx.clone(),
                                 transport,
+                                executor_registration.clone(),
                             ),
                         );
                     }
@@ -736,6 +749,16 @@ where
         let stream_id = frame.stream_id.clone();
         match kind {
             RelayFrameBodyKind::Handshake => {
+                // Stop admitting work before parsing another hybrid handshake.
+                // Existing streams and already-admitted validations keep running.
+                if let Some(deadline) = handshake_cooldown_until {
+                    if Instant::now() < deadline {
+                        send_reset(&physical_outgoing_tx, stream_id);
+                        continue;
+                    }
+                    failed_handshakes = 0;
+                    handshake_cooldown_until = None;
+                }
                 // Reject duplicate or busy streams before paying for a hybrid
                 // handshake. Malformed attempts that reach cryptography are
                 // covered by the connection-wide failure budget below.
@@ -746,10 +769,7 @@ where
                 // Removing pending state makes the in-flight validation result stale.
                 if pending_handshakes.remove(&stream_id).is_some() {
                     send_reset(&physical_outgoing_tx, stream_id);
-                    if failed_handshake_budget_exhausted(&mut failed_handshakes) {
-                        warn!("closing Noise relay after repeated handshake failures");
-                        break;
-                    }
+                    record_failed_handshake(&mut failed_handshakes, &mut handshake_cooldown_until);
                     continue;
                 }
                 if streams.len() >= MAX_ACTIVE_NOISE_RELAY_STREAMS {
@@ -778,10 +798,10 @@ where
                         Err(error) => {
                             warn!("failed to read Noise relay handshake request: {error}");
                             send_reset(&physical_outgoing_tx, stream_id);
-                            if failed_handshake_budget_exhausted(&mut failed_handshakes) {
-                                warn!("closing Noise relay after repeated handshake failures");
-                                break;
-                            }
+                            record_failed_handshake(
+                                &mut failed_handshakes,
+                                &mut handshake_cooldown_until,
+                            );
                             continue;
                         }
                     };
@@ -805,10 +825,7 @@ where
                 };
                 let Some(authorization) = authorization else {
                     send_reset(&physical_outgoing_tx, stream_id);
-                    if failed_handshake_budget_exhausted(&mut failed_handshakes) {
-                        warn!("closing Noise relay after repeated handshake failures");
-                        break;
-                    }
+                    record_failed_handshake(&mut failed_handshakes, &mut handshake_cooldown_until);
                     continue;
                 };
                 let harness_public_key = pending.initiator_public_key.clone();
@@ -850,11 +867,11 @@ where
                     let canceled_pending_handshake =
                         pending_handshakes.remove(&stream_id).is_some();
                     send_reset(&physical_outgoing_tx, stream_id);
-                    if canceled_pending_handshake
-                        && failed_handshake_budget_exhausted(&mut failed_handshakes)
-                    {
-                        warn!("closing Noise relay after repeated handshake failures");
-                        break;
+                    if canceled_pending_handshake {
+                        record_failed_handshake(
+                            &mut failed_handshakes,
+                            &mut handshake_cooldown_until,
+                        );
                     }
                     continue;
                 };
@@ -877,7 +894,7 @@ where
                 pending_handshakes.remove(&stream_id);
                 if let Some(stream) = streams.remove(&stream_id) {
                     // The reset reason is unauthenticated, so do not log it.
-                    stream.disconnect(/*reason*/ None);
+                    stream.disconnect();
                 }
             }
             RelayFrameBodyKind::Ack
@@ -887,7 +904,7 @@ where
     }
 
     for (_stream_id, stream) in streams {
-        stream.disconnect(/*reason*/ None);
+        stream.disconnect();
     }
     // Dropping the JoinSet aborts any registry checks still running.
     if !physical_writer_task.is_finished() {
@@ -899,11 +916,21 @@ where
 
 /// Charge one failed authenticated-channel attempt to this physical relay.
 ///
-/// Closing after a small fixed budget prevents a peer that has not been
-/// authorized from triggering unbounded hybrid handshakes or registry checks.
-fn failed_handshake_budget_exhausted(failed_handshakes: &mut usize) -> bool {
+/// Pause new handshakes after a small fixed budget without disconnecting
+/// authenticated streams. In-flight validation failures do not extend the
+/// cooldown, so they cannot indefinitely prevent new streams from connecting.
+fn record_failed_handshake(
+    failed_handshakes: &mut usize,
+    handshake_cooldown_until: &mut Option<Instant>,
+) {
+    if handshake_cooldown_until.is_some() {
+        return;
+    }
     *failed_handshakes += 1;
-    *failed_handshakes >= MAX_FAILED_NOISE_HANDSHAKES
+    if *failed_handshakes >= MAX_FAILED_NOISE_HANDSHAKES {
+        *handshake_cooldown_until = Some(Instant::now() + NOISE_HANDSHAKE_FAILURE_COOLDOWN);
+        warn!("pausing Noise relay handshakes after repeated failures");
+    }
 }
 
 /// Responder state held while registry authorization is pending.

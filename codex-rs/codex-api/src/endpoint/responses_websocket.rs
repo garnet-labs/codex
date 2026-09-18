@@ -225,7 +225,7 @@ impl ResponsesWebsocketConnection {
         name = "responses_websocket.stream_request",
         level = "info",
         skip_all,
-        fields(transport = "responses_websocket", api.path = "responses")
+        fields(transport = "responses_websocket", api.path = "/responses")
     )]
     pub async fn stream_request(
         &self,
@@ -376,7 +376,7 @@ impl ResponsesWebsocketClient {
         name = "responses_websocket.connect",
         level = "info",
         skip_all,
-        fields(transport = "responses_websocket", api.path = "responses")
+        fields(transport = "responses_websocket", api.path = "/responses")
     )]
     pub async fn connect(
         &self,
@@ -388,7 +388,7 @@ impl ResponsesWebsocketClient {
     ) -> Result<ResponsesWebsocketConnection, ApiError> {
         let ws_url = self
             .provider
-            .websocket_url_for_path("responses")
+            .websocket_url_for_path("/responses")
             .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
 
         let mut headers =
@@ -422,7 +422,7 @@ impl ResponsesWebsocketClient {
     ) -> Result<ResponsesWebsocketProbe, ApiError> {
         let ws_url = self
             .provider
-            .websocket_url_for_path("responses")
+            .websocket_url_for_path("/responses")
             .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
 
         let mut headers =
@@ -955,6 +955,9 @@ mod tests {
             service_tier: Some("priority".to_string()),
             prompt_cache_key: Some("cache-key".to_string()),
             text: None,
+            access_programs: Some(
+                codex_protocol::turn_input::CyberAccessProgram::DaybreakBlue.into(),
+            ),
             client_metadata: Some(HashMap::from([(
                 "traceparent".to_string(),
                 "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01".to_string(),

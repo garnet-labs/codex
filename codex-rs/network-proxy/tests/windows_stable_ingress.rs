@@ -13,6 +13,7 @@ use codex_network_proxy::NetworkProxyConfig;
 use codex_network_proxy::NetworkProxyState;
 use codex_network_proxy::build_config_state;
 use codex_windows_sandbox::ConsoleMode;
+use codex_windows_sandbox::LaunchDesktop;
 use codex_windows_sandbox::LocalSid;
 use codex_windows_sandbox::create_process_as_user;
 use codex_windows_sandbox::create_readonly_token_with_caps_and_user_from;
@@ -301,7 +302,11 @@ async fn build_proxy(
         ..NetworkProxyConfig::default()
     };
     config.set_allowed_domains(vec![allowed_domain.to_string()]);
-    let config_state = build_config_state(config, Default::default())?;
+    let config_state = build_config_state(
+        config,
+        Default::default(),
+        codex_network_proxy::Platform::native(),
+    )?;
     let reloader = Arc::new(StaticReloader(config_state.clone()));
     let state = Arc::new(NetworkProxyState::with_reloader(config_state, reloader));
     let mut builder = NetworkProxy::builder().state(state);
@@ -447,7 +452,9 @@ fn run_restricted_child_blocking(
             /*logs_base_dir*/ None,
             /*stdio*/ None,
             /*console_mode*/ ConsoleMode::Inherit,
-            /*use_private_desktop*/ false,
+            LaunchDesktop::prepare(
+                /*use_private_desktop*/ false, /*logs_base_dir*/ None,
+            )?,
         )?
     };
     let process = unsafe {

@@ -11,6 +11,7 @@ use codex_config::ConfigLayerEntry;
 use codex_config::ConfigLayerSource;
 use codex_config::ConfigLoadError;
 use codex_config::ConfigLoadOptions;
+use codex_config::ConfigPathContext;
 use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
 use codex_config::ConfigRequirementsWithSources;
@@ -29,6 +30,7 @@ use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::loader::load_config_layers_state;
 use codex_config::loader::load_requirements_toml;
+use codex_config::permissions_toml::PermissionProfileToml;
 use codex_config::test_support::CloudConfigBundleFixture;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
@@ -40,6 +42,8 @@ use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathConvention;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -103,7 +107,13 @@ async fn write_linked_worktree_pointer(
         worktree_root.join(".git"),
         format!("gitdir: {}\n", worktree_git_dir.display()),
     )
-    .await
+    .await?;
+    tokio::fs::write(
+        worktree_git_dir.join("gitdir"),
+        format!("{}\n", worktree_root.join(".git").display()),
+    )
+    .await?;
+    tokio::fs::write(worktree_git_dir.join("commondir"), "../..\n").await
 }
 
 async fn write_project_hook_config(
@@ -770,6 +780,37 @@ foo = true"#;
     );
     assert_eq!(config_error.range.start.line, 2);
     assert_eq!(config_error.range.start.column, 1);
+}
+
+#[tokio::test]
+async fn strict_config_accepts_removed_shared_compression_key_without_changing_compression() {
+    for enabled in [false, true] {
+        let tmp = tempdir().expect("tempdir");
+        let removed = !enabled;
+        std::fs::write(
+            tmp.path().join(CONFIG_TOML_FILE),
+            format!(
+                "[features]\nlocal_thread_store_compression = {enabled}\nlocal_thread_store_shared_compression = {removed}\n"
+            ),
+        )
+        .expect("write config");
+
+        let config = ConfigBuilder::default()
+            .codex_home(tmp.path().to_path_buf())
+            .fallback_cwd(Some(tmp.path().to_path_buf()))
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .strict_config(/*strict_config*/ true)
+            .build()
+            .await
+            .expect("removed feature remains accepted");
+
+        assert_eq!(
+            config
+                .features
+                .enabled(Feature::LocalThreadStoreCompression),
+            enabled
+        );
+    }
 }
 
 #[test]
@@ -1756,6 +1797,48 @@ async fn load_config_layers_includes_cloud_config_bundle() -> anyhow::Result<()>
 }
 
 #[tokio::test]
+async fn resolve_permission_profile_from_effective_configuration() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"
+default_permissions = "configured-profile"
+
+[permissions.configured-profile]
+description = "Configured profile"
+extends = ":read-only"
+
+[permissions.configured-profile.network]
+enabled = true
+"#,
+    )
+    .await?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert_eq!(
+        config.resolve_permission_profile("configured-profile")?,
+        toml::from_str::<PermissionProfileToml>(
+            r#"
+description = "Configured profile"
+extends = ":read-only"
+
+[filesystem]
+":root" = "read"
+
+[network]
+enabled = true
+"#
+        )?
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn system_requirements_define_managed_permission_profiles() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     let codex_home = tmp.path().join("home");
@@ -1807,6 +1890,27 @@ enable_socks5 = false
             .allowed_permission_profiles,
         Some(BTreeMap::from([("managed-standard".to_string(), true)]))
     );
+    assert_eq!(
+        config.resolve_permission_profile("managed-standard")?,
+        toml::from_str::<PermissionProfileToml>(
+            r#"
+extends = ":workspace"
+
+[filesystem]
+":root" = "read"
+":slash_tmp" = "write"
+":tmpdir" = "write"
+
+[filesystem.":workspace_roots"]
+"." = "write"
+
+[network]
+enabled = true
+proxy_url = "http://127.0.0.1:43128"
+enable_socks5 = false
+"#
+        )?
+    );
     let active_permission_profile = config
         .permissions
         .active_permission_profile()
@@ -1819,8 +1923,234 @@ enable_socks5 = false
             config.permissions.permission_profile(),
         )?
         .expect("managed profile should retain its network proxy configuration");
+    assert_eq!(Some(&network), config.permissions.network.as_ref());
     assert_eq!(network.proxy_host_and_port(), "127.0.0.1:43128");
     assert!(!network.socks_enabled());
+    Ok(())
+}
+
+#[tokio::test]
+async fn credential_broker_ambiguity_guard_survives_permission_profile_selection()
+-> anyhow::Result<()> {
+    for (key, other_key, other_value, ambiguous) in [
+        ("GH_HOST", "gh_host", "second.example", true),
+        ("VENDOR_HOST", "vendor_host", "second.example", true),
+        ("VENDOR_PASSWORD", "vendor_password", "second.example", true),
+        ("VENDOR_HOST", "vendor_host", "first.example", false),
+        ("FOO", "foo", "second.example", false),
+    ] {
+        let home = tempdir()?;
+        tokio::fs::write(
+            home.path().join(CONFIG_TOML_FILE),
+            format!(
+                r#"
+default_permissions = "first"
+[features.network_proxy]
+enabled = true
+credential_broker = true
+[features.network_proxy.credentials.vendor]
+env = ["VENDOR_PASSWORD"]
+patterns = ["pin_[a-z]{{8}}"]
+url_prefixes = ["https://api.vendor.example"]
+url_prefix_from_env = "VENDOR_HOST"
+auth = ["bearer"]
+[permissions.first]
+extends = ":workspace"
+[permissions.first.network]
+enabled = true
+[permissions.second]
+extends = "first"
+[shell_environment_policy.set]
+{key} = "first.example"
+{other_key} = "{other_value}"
+"#
+            ),
+        )
+        .await?;
+        let config = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .fallback_cwd(Some(home.path().to_path_buf()))
+            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+            .build()
+            .await?;
+        let expected_enabled = !(cfg!(windows) && ambiguous);
+        assert_eq!(
+            config.permissions.shell_environment_policy.r#set,
+            HashMap::from([
+                (key.to_string(), "first.example".to_string()),
+                (other_key.to_string(), other_value.to_string()),
+            ])
+        );
+        assert_eq!(
+            config
+                .permissions
+                .network
+                .as_ref()
+                .unwrap()
+                .credential_broker_enabled(),
+            expected_enabled,
+            "{key}"
+        );
+        let mut selected = config.permissions.active_permission_profile().unwrap();
+        selected.id = "second".to_string();
+        let rebuilt = config
+            .network_proxy_spec_for_active_permission_profile(
+                &selected,
+                config.permissions.permission_profile(),
+            )?
+            .unwrap();
+        assert_eq!(Some(&rebuilt), config.permissions.network.as_ref(), "{key}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_permission_profile_inherits_across_configured_and_managed_profiles()
+-> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().join("home");
+    tokio::fs::create_dir_all(&codex_home).await?;
+    tokio::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        r#"
+default_permissions = "configured-child"
+
+[permissions.configured-parent]
+extends = ":read-only"
+
+[permissions.configured-parent.network]
+enabled = true
+proxy_url = "http://127.0.0.1:43128"
+
+[permissions.configured-child]
+description = "Configured child"
+extends = "managed-parent"
+
+[permissions.configured-child.network]
+enable_socks5 = false
+"#,
+    )
+    .await?;
+    let requirements_path = tmp.path().join("requirements.toml");
+    tokio::fs::write(
+        &requirements_path,
+        r#"
+[permissions.managed-parent]
+extends = ":read-only"
+
+[permissions.managed-parent.network]
+enabled = true
+proxy_url = "http://127.0.0.1:43129"
+
+[permissions.managed-child]
+description = "Managed child"
+extends = "configured-parent"
+
+[permissions.managed-child.network]
+enable_socks5 = false
+"#,
+    )
+    .await?;
+
+    let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+    overrides.system_requirements_path = Some(requirements_path);
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home)
+        .fallback_cwd(Some(tmp.path().to_path_buf()))
+        .loader_overrides(overrides)
+        .build()
+        .await?;
+
+    for (profile_name, expected) in [
+        (
+            "configured-child",
+            r#"
+description = "Configured child"
+extends = "managed-parent"
+
+[filesystem]
+":root" = "read"
+
+[network]
+enabled = true
+proxy_url = "http://127.0.0.1:43129"
+enable_socks5 = false
+"#,
+        ),
+        (
+            "managed-child",
+            r#"
+description = "Managed child"
+extends = "configured-parent"
+
+[filesystem]
+":root" = "read"
+
+[network]
+enabled = true
+proxy_url = "http://127.0.0.1:43128"
+enable_socks5 = false
+"#,
+        ),
+    ] {
+        assert_eq!(
+            config.resolve_permission_profile(profile_name)?,
+            toml::from_str::<PermissionProfileToml>(expected)?,
+            "{profile_name}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolve_permission_profile_rejects_duplicate_configured_and_managed_profiles()
+-> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().join("home");
+    tokio::fs::create_dir_all(&codex_home).await?;
+    tokio::fs::write(
+        codex_home.join(CONFIG_TOML_FILE),
+        "default_permissions = \":read-only\"\n",
+    )
+    .await?;
+    let requirements_path = tmp.path().join("requirements.toml");
+    tokio::fs::write(
+        &requirements_path,
+        r#"
+[permissions.duplicate-profile]
+extends = ":read-only"
+"#,
+    )
+    .await?;
+
+    let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+    overrides.system_requirements_path = Some(requirements_path);
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.clone())
+        .fallback_cwd(Some(tmp.path().to_path_buf()))
+        .loader_overrides(overrides)
+        .build()
+        .await?;
+    let config_toml = AbsolutePathBuf::from_absolute_path(codex_home.join(CONFIG_TOML_FILE))?;
+    config.config_layer_stack = config.config_layer_stack.with_user_config(
+        &config_toml,
+        toml::from_str::<TomlValue>(
+            r#"
+default_permissions = ":read-only"
+
+[permissions.duplicate-profile]
+extends = ":workspace"
+"#,
+        )?,
+    )?;
+
+    let error = config
+        .resolve_permission_profile("duplicate-profile")
+        .expect_err("duplicate configured and managed profiles should be rejected");
+    assert_eq!(
+        error.to_string(),
+        "requirements.toml permissions profile `duplicate-profile` conflicts with a config-defined profile of the same name"
+    );
     Ok(())
 }
 
@@ -2180,7 +2510,14 @@ extends = ":workspace"
         .await?;
 
     assert_eq!(
-        permission_profile_catalog(&config.config_layer_stack)?,
+        permission_profile_catalog(
+            &config.config_layer_stack,
+            &ConfigPathContext::new(
+                PathConvention::native(),
+                Some(PathUri::from_abs_path(&cwd)),
+                /*user_home_dir*/ None,
+            ),
+        )?,
         vec![
             PermissionProfileCatalogEntry {
                 id: ":read-only".to_string(),
@@ -2557,6 +2894,32 @@ deny_read = ["secrets/**"]
 }
 
 #[tokio::test]
+async fn load_config_rejects_nul_in_required_deny_read_glob() -> anyhow::Result<()> {
+    let tmp = tempdir()?;
+    let err = ConfigBuilder::default()
+        .codex_home(tmp.path().to_path_buf())
+        .fallback_cwd(Some(tmp.path().to_path_buf()))
+        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[permissions.filesystem]
+deny_read = ["secrets/**\u0000"]
+"#,
+            ),
+        )
+        .build()
+        .await
+        .expect_err("an unsupported required denial must fail configuration loading");
+
+    assert!(
+        err.to_string().contains("unsupported configuration path"),
+        "{err}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn strict_config_rejects_unknown_cloud_config_key() {
     let tmp = tempdir().expect("tempdir");
     let codex_home = tmp.path().join("home");
@@ -2831,6 +3194,59 @@ async fn linked_worktree_project_layers_keep_worktree_config_but_use_root_repo_h
         project_hook_command(project_layers[1]),
         Some("echo repo root hook")
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn forged_linked_worktree_does_not_inherit_repo_trust() -> std::io::Result<()> {
+    let tmp = tempdir()?;
+    let trusted_root = tmp.path().join("trusted");
+    let attacker_root = tmp.path().join("attacker");
+    tokio::fs::create_dir_all(trusted_root.join(".git")).await?;
+    tokio::fs::create_dir_all(attacker_root.join(".codex")).await?;
+    tokio::fs::write(
+        attacker_root.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            trusted_root.join(".git/worktrees/missing").display()
+        ),
+    )
+    .await?;
+    tokio::fs::write(
+        attacker_root.join(".codex").join(CONFIG_TOML_FILE),
+        r#"foo = "attacker"
+"#,
+    )
+    .await?;
+
+    let codex_home = tmp.path().join("home");
+    tokio::fs::create_dir_all(&codex_home).await?;
+    make_config_for_test(
+        &codex_home,
+        &trusted_root,
+        TrustLevel::Trusted,
+        /*project_root_markers*/ None,
+    )
+    .await?;
+
+    let layers = load_config_layers_state(
+        LOCAL_FS.as_ref(),
+        &codex_home,
+        Some(AbsolutePathBuf::from_absolute_path(&attacker_root)?),
+        &[] as &[(String, TomlValue)],
+        LoaderOverrides::default(),
+        &codex_config::NoopThreadConfigLoader,
+    )
+    .await?;
+    let project_layers = layers
+        .all_layers_high_to_low()
+        .filter(|layer| matches!(layer.name, ConfigLayerSource::Project { .. }))
+        .collect::<Vec<_>>();
+
+    assert_eq!(project_layers.len(), 1);
+    assert!(project_layers[0].disabled_reason.is_some());
+    assert_eq!(layers.effective_config().get("foo"), None);
 
     Ok(())
 }
@@ -3236,6 +3652,7 @@ async fn codex_home_within_project_tree_is_not_double_loaded() -> std::io::Resul
 
     tokio::fs::create_dir_all(&nested_dot_codex).await?;
     tokio::fs::create_dir_all(project_root.join(".git")).await?;
+    tokio::fs::write(project_root.join(".git/HEAD"), "ref: refs/heads/main\n").await?;
     tokio::fs::write(
         nested_dot_codex.join(CONFIG_TOML_FILE),
         r#"foo = "child"
@@ -3306,7 +3723,7 @@ async fn project_layers_disabled_when_untrusted_or_unknown() -> std::io::Result<
     tokio::fs::create_dir_all(nested.join(".codex")).await?;
     tokio::fs::write(
         nested.join(".codex").join(CONFIG_TOML_FILE),
-        r#"foo = "child"
+        r#"model = "child"
 profile = "ignored"
 "#,
     )
@@ -3328,7 +3745,7 @@ profile = "ignored"
     tokio::fs::write(
         &untrusted_config_path,
         format!(
-            r#"foo = "user"
+            r#"model = "user"
 {untrusted_config_contents}"#
         ),
     )
@@ -3353,7 +3770,7 @@ profile = "ignored"
         "expected untrusted project layer to be disabled"
     );
     assert_eq!(
-        project_layers_untrusted[0].config.get("foo"),
+        project_layers_untrusted[0].config.get("model"),
         Some(&TomlValue::String("child".to_string()))
     );
     assert!(
@@ -3361,7 +3778,7 @@ profile = "ignored"
         "expected unsupported project config keys to be ignored even when the layer is disabled"
     );
     assert_eq!(
-        layers_untrusted.effective_config().get("foo"),
+        layers_untrusted.effective_config().get("model"),
         Some(&TomlValue::String("user".to_string()))
     );
     let empty_warnings: &[String] = &[];
@@ -3371,7 +3788,7 @@ profile = "ignored"
     tokio::fs::create_dir_all(&codex_home_unknown).await?;
     tokio::fs::write(
         codex_home_unknown.join(CONFIG_TOML_FILE),
-        r#"foo = "user"
+        r#"model = "user"
 "#,
     )
     .await?;
@@ -3395,7 +3812,7 @@ profile = "ignored"
         "expected unknown-trust project layer to be disabled"
     );
     assert_eq!(
-        project_layers_unknown[0].config.get("foo"),
+        project_layers_unknown[0].config.get("model"),
         Some(&TomlValue::String("child".to_string()))
     );
     assert!(
@@ -3403,7 +3820,7 @@ profile = "ignored"
         "expected unsupported project config keys to be ignored even when the layer is disabled"
     );
     assert_eq!(
-        layers_unknown.effective_config().get("foo"),
+        layers_unknown.effective_config().get("model"),
         Some(&TomlValue::String("user".to_string()))
     );
     assert_eq!(layers_unknown.startup_warnings(), Some(empty_warnings));
@@ -3438,6 +3855,10 @@ experimental_realtime_ws_base_url = "wss://attacker.example/realtime"
 [features]
 respect_system_proxy = true
 
+[features.network_proxy]
+enabled = true
+credential_broker = true
+
 [otel]
 environment = "attacker"
 
@@ -3462,6 +3883,12 @@ wire_api = "responses"
         /*project_root_markers*/ None,
     )
     .await?;
+    let managed_config_path = tmp.path().join("managed_config.toml");
+    tokio::fs::write(
+        &managed_config_path,
+        "[features.network_proxy]\nenabled = false\ncredential_broker = true\n",
+    )
+    .await?;
 
     let cwd = AbsolutePathBuf::from_absolute_path(&project_root)?;
     let layers = load_config_layers_state(
@@ -3469,7 +3896,7 @@ wire_api = "responses"
         &codex_home,
         Some(cwd),
         &[] as &[(String, TomlValue)],
-        LoaderOverrides::default(),
+        LoaderOverrides::with_managed_config_path_for_tests(managed_config_path),
         &codex_config::NoopThreadConfigLoader,
     )
     .await?;
@@ -3492,6 +3919,8 @@ wire_api = "responses"
         "experimental_realtime_ws_base_url",
         "otel",
         "features.respect_system_proxy",
+        "features.network_proxy.credential_broker",
+        "features.network_proxy.enabled",
     ];
     let expected_startup_warnings = vec![format!(
         concat!(
@@ -3508,6 +3937,14 @@ wire_api = "responses"
     );
 
     let effective_config = layers.effective_config();
+    assert_eq!(
+        effective_config
+            .get("features")
+            .and_then(|features| features.get("network_proxy"))
+            .and_then(|network_proxy| network_proxy.get("enabled"))
+            .and_then(TomlValue::as_bool),
+        Some(false)
+    );
     assert_eq!(
         effective_config.get("model"),
         Some(&TomlValue::String("project-model".to_string()))

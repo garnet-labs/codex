@@ -30,7 +30,7 @@ fn strict_config_rejects_unknown_config_override() -> Result<()> {
     let codex_home = TempDir::new()?;
 
     let mut cmd = codex_command(codex_home.path())?;
-    cmd.args(["--strict-config", "-c", "foo=bar", "mcp-server"])
+    cmd.args(["--strict-config", "-c", "foo=bar", "exec", "hello"])
         .assert()
         .failure()
         .stderr(contains("unknown configuration field"));
@@ -133,15 +133,19 @@ fn strict_config_is_not_supported_for_cloud_command() -> Result<()> {
 async fn features_enable_writes_feature_flag_to_config() -> Result<()> {
     let codex_home = TempDir::new()?;
 
-    let mut cmd = codex_command(codex_home.path())?;
-    cmd.args(["features", "enable", "unified_exec"])
-        .assert()
-        .success()
-        .stdout(contains("Enabled feature `unified_exec` in config.toml."));
+    for feature in ["unified_exec", "transcript_v2"] {
+        let mut cmd = codex_command(codex_home.path())?;
+        cmd.args(["features", "enable", feature])
+            .assert()
+            .success()
+            .stdout(contains(format!(
+                "Enabled feature `{feature}` in config.toml."
+            )));
 
-    let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-    assert!(config.contains("[features]"));
-    assert!(config.contains("unified_exec = true"));
+        let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+        assert!(config.contains("[features]"));
+        assert!(config.contains(&format!("{feature} = true")));
+    }
 
     Ok(())
 }
@@ -292,5 +296,37 @@ async fn features_list_honors_cloud_managed_feature_requirements() -> Result<()>
     );
     server.verify().await;
 
+    Ok(())
+}
+
+#[test]
+fn no_daemon_rejects_agents_and_explicit_remote_targets() -> Result<()> {
+    for args in [
+        "--no-daemon agents",
+        "agents --no-daemon",
+        "--no-daemon queue --thread example --message hello",
+        "--no-daemon --remote ws://localhost:9999 agents",
+        "--no-daemon --remote ws://localhost:9999",
+        "--no-daemon --remote ws://localhost:9999 archive example",
+        "--no-daemon --remote ws://localhost:9999 queue --thread example --message hello",
+        "--remote ws://localhost:9999 resume --no-daemon --last",
+        "--no-daemon fork --remote ws://localhost:9999 session-name",
+    ] {
+        let args = args.split_whitespace().collect::<Vec<_>>();
+        let home = TempDir::new()?;
+        let expected = if args.contains(&"agents") {
+            "--no-daemon cannot be used with codex agents."
+        } else if args.contains(&"queue") && !args.contains(&"--remote") {
+            "--no-daemon cannot be used with codex queue."
+        } else {
+            "--no-daemon cannot be used with --remote."
+        };
+        codex_command(home.path())?
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(contains(expected));
+        assert!(!home.path().join("app-server-daemon").exists());
+    }
     Ok(())
 }

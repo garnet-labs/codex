@@ -220,6 +220,20 @@ fn catalog_budget_uses_context_percentage_or_character_fallback() {
 #[test]
 fn host_only_prompts_preserve_existing_behavior_with_and_without_aliases() {
     let root = "/Users/test/.codex/plugins/cache/openai-curated/host-plugin/1.0.0/skills-with-a-long-shared-root";
+    let unaliased_catalog = SkillCatalog {
+        entries: [
+            ("alpha", "Alpha skill."),
+            ("beta", "Beta skill."),
+            ("gamma", "Gamma skill."),
+        ]
+        .into_iter()
+        .map(|(name, description)| {
+            entry(name, description, /*short_description*/ None)
+                .with_display_path(format!("{root}/{name}/SKILL.md"))
+        })
+        .collect(),
+        warnings: Vec::new(),
+    };
     let catalog = SkillCatalog {
         entries: [
             ("alpha", "Alpha skill."),
@@ -237,7 +251,7 @@ fn host_only_prompts_preserve_existing_behavior_with_and_without_aliases() {
     };
 
     let unaliased = available_skills_fragment(
-        &catalog,
+        &unaliased_catalog,
         /*include_skills_usage_instructions*/ true,
         SkillCatalogRenderPolicy::CoreCompatible,
         SkillMetadataBudget::Characters(usize::MAX),
@@ -310,7 +324,7 @@ fn host_only_prompts_preserve_existing_behavior_with_and_without_aliases() {
 }
 
 #[test]
-fn path_aliases_are_not_used_without_budget_pressure() {
+fn path_aliases_are_used_without_budget_pressure_when_they_reduce_prompt_size() {
     let root = "/Users/test/.codex/plugins/cache/openai-curated/example/hash/skills";
     let catalog = SkillCatalog {
         entries: vec![
@@ -332,12 +346,8 @@ fn path_aliases_are_not_used_without_budget_pressure() {
     )
     .expect("catalog should render");
 
-    assert!(!fragment.body().contains("### Skill roots"));
-    assert!(
-        fragment
-            .body()
-            .contains(&format!("(file: {root}/alpha/SKILL.md)"))
-    );
+    assert!(fragment.body().contains("### Skill roots"));
+    assert!(fragment.body().contains("(file: r0/alpha/SKILL.md)"));
 }
 
 #[test]
@@ -1073,64 +1083,5 @@ fn catalog_preserves_report_when_no_fragment_fits_budget() {
         render
             .into_fragment(/*include_skills_usage_instructions*/ false)
             .is_none()
-    );
-}
-
-#[test]
-fn substantial_description_shortening_emits_warning() {
-    let catalog = SkillCatalog {
-        entries: vec![
-            entry(
-                "long-skill",
-                &"a".repeat(250),
-                /*short_description*/ None,
-            ),
-            entry("empty-skill", "", /*short_description*/ None),
-        ],
-        warnings: Vec::new(),
-    };
-    let skill_lines = catalog
-        .entries
-        .iter()
-        .map(|entry| SkillLine::new(entry, SkillCatalogRenderPolicy::ExtensionCompatible))
-        .collect::<Vec<_>>();
-    let minimum_cost = skill_lines.iter().fold(0usize, |used, line| {
-        used.saturating_add(line.minimum_cost(SkillMetadataBudget::Characters(usize::MAX)))
-    });
-    let render = render_available_skills(
-        &catalog,
-        SkillCatalogRenderPolicy::ExtensionCompatible,
-        SkillMetadataBudget::Characters(minimum_cost + 49),
-        /*include_skills_usage_instructions*/ false,
-    )
-    .expect("catalog should render");
-
-    assert_eq!(
-        render.report.warning_message(),
-        Some(
-            "Skill descriptions were shortened to fit the skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest."
-                .to_string()
-        )
-    );
-}
-
-#[test]
-fn substantial_description_shortening_warning_starts_above_threshold() {
-    let report_at_threshold = SkillRenderReport {
-        total_count: 2,
-        included_count: 2,
-        omitted_count: 0,
-        truncated_description_chars: 200,
-        truncated_description_count: 2,
-    };
-    assert_eq!(report_at_threshold.warning_message(), None);
-
-    let report_above_threshold = SkillRenderReport {
-        truncated_description_chars: 201,
-        ..report_at_threshold
-    };
-    assert_eq!(
-        report_above_threshold.warning_message(),
-        Some(SKILL_DESCRIPTION_TRUNCATED_WARNING.to_string())
     );
 }

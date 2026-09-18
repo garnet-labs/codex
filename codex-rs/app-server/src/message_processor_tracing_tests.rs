@@ -5,6 +5,7 @@ use crate::analytics_utils::analytics_events_client_from_config;
 use crate::config_manager::ConfigManager;
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingMessageSender;
+use crate::plugin_config_reload::PluginStartupConfig;
 use crate::transport::AppServerTransport;
 use anyhow::Result;
 use app_test_support::create_mock_responses_server_repeating_assistant;
@@ -128,7 +129,9 @@ impl TracingHarness {
             _codex_home: codex_home,
             processor,
             outgoing_rx,
-            session: Arc::new(ConnectionSessionState::new()),
+            session: Arc::new(ConnectionSessionState::new(
+                crate::transport::ConnectionOrigin::Stdio,
+            )),
             tracing,
         };
 
@@ -264,12 +267,15 @@ async fn build_test_processor(
         state_db: None,
         config_warnings: Vec::new(),
         session_source: SessionSource::VSCode,
+        user_verification: Arc::new(crate::user_verification::Service::new(Arc::clone(
+            &auth_manager,
+        ))),
         auth_manager,
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         code_mode_session_provider: None,
         rpc_transport: AppServerRpcTransport::Stdio,
         remote_control_handle: None,
-        plugin_startup_tasks: crate::PluginStartupTasks::Start,
+        plugin_startup_tasks: Some(PluginStartupConfig::Current),
     }));
     (processor, outgoing_rx)
 }
@@ -656,6 +662,7 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
             ClientRequest::TurnStart {
                 request_id: RequestId::Integer(3),
                 params: TurnStartParams {
+                    disabled_plugin_ids: None,
                     environments: None,
                     thread_id,
                     client_user_message_id: None,
@@ -663,6 +670,8 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
                         text: "hello".to_string(),
                         text_elements: Vec::new(),
                     }],
+                    turn_trigger: None,
+                    tool_output: None,
                     responsesapi_client_metadata: None,
                     additional_context: None,
                     cwd: None,
@@ -673,12 +682,14 @@ async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
                     approvals_reviewer: None,
                     model: None,
                     service_tier: None,
+                    service_tier_for_turn: None,
                     effort: None,
                     summary: None,
                     personality: None,
                     output_schema: None,
                     collaboration_mode: None,
                     multi_agent_mode: None,
+                    cyber_access_program: None,
                 },
             },
             Some(remote_trace),

@@ -6,6 +6,8 @@ use std::num::NonZeroU64;
 use std::path::Path;
 
 use crate::HooksToml;
+use crate::browser_use::BrowserUseConfigToml;
+use crate::computer_use::ComputerUseConfigToml;
 use crate::permissions_toml::PermissionsToml;
 use crate::profile_toml::ConfigProfile;
 use crate::types::AnalyticsConfigToml;
@@ -15,6 +17,7 @@ use crate::types::AuthCredentialsStoreMode;
 use crate::types::FeedbackConfigToml;
 use crate::types::History;
 use crate::types::MarketplaceConfig;
+use crate::types::McpEnterpriseManagedAuthConfig;
 use crate::types::McpServerConfig;
 use crate::types::MemoriesToml;
 use crate::types::Notice;
@@ -53,6 +56,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path::normalize_for_path_comparison;
+use codex_utils_path_uri::Platform;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -170,6 +174,7 @@ pub struct ConfigToml {
     pub model_auto_compact_token_limit_scope: Option<AutoCompactTokenLimitScope>,
 
     /// Default approval policy for executing commands.
+    #[schemars(with = "Option<crate::schema::ConfigAskForApproval>")]
     pub approval_policy: Option<AskForApproval>,
 
     /// Configures who approval requests are routed to for review once they have
@@ -180,6 +185,10 @@ pub struct ConfigToml {
     /// Optional policy instructions for the guardian auto-reviewer.
     #[serde(default)]
     pub auto_review: Option<AutoReviewToml>,
+
+    pub browser_use: Option<BrowserUseConfigToml>,
+
+    pub computer_use: Option<ComputerUseConfigToml>,
 
     #[serde(default)]
     pub shell_environment_policy: ShellEnvironmentPolicyToml,
@@ -196,6 +205,13 @@ pub struct ConfigToml {
 
     /// Sandbox mode to use.
     pub sandbox_mode: Option<SandboxMode>,
+
+    /// Allow macOS sandbox writable roots at or beneath CODEX_HOME to traverse
+    /// symlinks. Read only from the host's user config at startup; defaults to false.
+    /// This grants no write access by itself, but trusts symlink targets even if
+    /// they change between commands or lie outside CODEX_HOME.
+    /// This setting has no effect on Linux or Windows.
+    pub allow_symlinked_codex_home: Option<bool>,
 
     /// Sandbox configuration to apply if `sandbox` is `WorkspaceWrite`.
     pub sandbox_workspace_write: Option<SandboxWorkspaceWrite>,
@@ -262,6 +278,10 @@ pub struct ConfigToml {
     #[schemars(schema_with = "crate::schema::mcp_servers_schema")]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
+    /// Trusted enterprise IdP shared by EMA-enabled MCP servers and plugins.
+    #[serde(default)]
+    pub mcp_enterprise_managed_auth: Option<McpEnterpriseManagedAuthConfig>,
+
     /// Preferred backend for storing MCP OAuth credentials.
     /// keyring: Use an OS-specific keyring service.
     ///          https://github.com/openai/codex/blob/main/codex-rs/rmcp-client/src/oauth.rs#L2
@@ -279,6 +299,12 @@ pub struct ConfigToml {
     /// of the local listener address. The local callback listener still binds
     /// to 127.0.0.1 (using `mcp_oauth_callback_port` when provided).
     pub mcp_oauth_callback_url: Option<String>,
+
+    /// Milliseconds to wait for optional MCP servers while building the initial tool catalog.
+    ///
+    /// Defaults to 1000. Set to 0 to disable the shared grace and wait for each
+    /// server's configured `startup_timeout_sec` instead.
+    pub mcp_optional_startup_grace_ms: Option<u64>,
 
     /// User-defined provider entries that extend the built-in list. Built-in
     /// IDs cannot be overridden.
@@ -299,6 +325,10 @@ pub struct ConfigToml {
     /// Maximum poll window for background terminal output (`write_stdin`), in milliseconds.
     /// Default: `300000` (5 minutes).
     pub background_terminal_max_timeout: Option<u64>,
+
+    /// Seconds a thread must have no subscribers and no activity before app-server
+    /// unloads it. Defaults to 60; zero unloads immediately. Changes require a server restart.
+    pub thread_unload_delay_secs: Option<u64>,
 
     /// Deprecated: ignored.
     #[schemars(skip)]
@@ -354,7 +384,7 @@ pub struct ConfigToml {
     /// Per-thread `config` overrides are accepted but do not reapply this (no-ops).
     pub model_catalog_json: Option<AbsolutePathBuf>,
 
-    /// Optionally specify a personality for the model
+    /// Deprecated: `friendly` and `pragmatic` no longer select a style.
     pub personality: Option<Personality>,
 
     /// Optional explicit service tier request id for new turns (for example
@@ -474,9 +504,7 @@ pub struct ConfigToml {
     /// Defaults to `true`.
     pub check_for_update_on_startup: Option<bool>,
 
-    /// When true, disables burst-paste detection for typed input entirely.
-    /// All characters are inserted as they are received, and no buffering
-    /// or placeholder replacement will occur for fast keypress bursts.
+    /// Legacy fallback for `tui.disable_paste_burst`. Prefer the setting under `[tui]`.
     pub disable_paste_burst: Option<bool>,
 
     /// When `false`, disables analytics across Codex product surfaces in this machine.
@@ -526,6 +554,8 @@ pub enum ThreadStoreToml {
 pub struct AutoReviewToml {
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
+    /// Experimental full Guardian prompt template containing the tenant policy placeholder.
+    pub experimental_policy_template: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
@@ -619,7 +649,7 @@ pub struct ExperimentalRequestUserInput {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct UpdatePlanToolConfig {
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub enabled: bool,
 }
 
@@ -720,8 +750,28 @@ pub struct GhostSnapshotToml {
     pub disable_warnings: Option<bool>,
 }
 
+/// Apply the executor's sandbox availability to an already selected sandbox mode.
+///
+/// Call this before resolving workspace-write settings so unused writable roots
+/// do not affect the read-only fallback. Named permission profiles are resolved
+/// separately and must not be downgraded through this helper.
+pub fn effective_sandbox_mode(
+    mode: SandboxMode,
+    platform: Platform,
+    windows_sandbox_level: WindowsSandboxLevel,
+) -> SandboxMode {
+    if platform == Platform::Windows
+        && windows_sandbox_level == WindowsSandboxLevel::Disabled
+        && mode == SandboxMode::WorkspaceWrite
+    {
+        SandboxMode::ReadOnly
+    } else {
+        mode
+    }
+}
+
 impl ConfigToml {
-    /// Derive the effective permission profile from legacy sandbox config.
+    /// Derive the effective permission profile from sandbox config.
     ///
     /// Call this only after ruling out `default_permissions`: named
     /// `[permissions]` profiles must be compiled through the permissions
@@ -737,30 +787,17 @@ impl ConfigToml {
         let resolved_sandbox_mode = configured_sandbox_mode
             .or_else(|| {
                 // If no sandbox_mode is set but this directory has a trust decision,
-                // default to workspace-write except on unsandboxed Windows where we
-                // default to read-only.
+                // default to workspace-write before applying the platform fallback.
                 active_project
                     .filter(|project| project.is_trusted() || project.is_untrusted())
-                    .map(|_| {
-                        if cfg!(target_os = "windows")
-                            && windows_sandbox_level == WindowsSandboxLevel::Disabled
-                        {
-                            SandboxMode::ReadOnly
-                        } else {
-                            SandboxMode::WorkspaceWrite
-                        }
-                    })
+                    .map(|_| SandboxMode::WorkspaceWrite)
             })
             .unwrap_or_default();
-        let effective_sandbox_mode = if cfg!(target_os = "windows")
-            // If the experimental Windows sandbox is enabled, do not force a downgrade.
-            && windows_sandbox_level == WindowsSandboxLevel::Disabled
-            && matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite)
-        {
-            SandboxMode::ReadOnly
-        } else {
-            resolved_sandbox_mode
-        };
+        let effective_sandbox_mode = effective_sandbox_mode(
+            resolved_sandbox_mode,
+            Platform::native(),
+            windows_sandbox_level,
+        );
 
         let permission_profile = match effective_sandbox_mode {
             SandboxMode::ReadOnly => PermissionProfile::read_only(),
@@ -905,10 +942,14 @@ pub fn validate_model_providers(
 ) -> Result<(), String> {
     validate_reserved_model_provider_ids(model_providers)?;
     for (key, provider) in model_providers {
-        if !matches!(
+        if matches!(
             key.as_str(),
             AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
         ) {
+            provider
+                .validate_bedrock_override()
+                .map_err(|message| format!("model_providers.{key} {message}"))?;
+        } else {
             if provider.aws.is_some() {
                 return Err(format!(
                     "model_providers.{key}: provider aws is only supported for \
@@ -966,6 +1007,47 @@ mod tests {
 
     const WORKSPACE_ID_A: &str = "123e4567-e89b-42d3-a456-426614174000";
     const WORKSPACE_ID_B: &str = "123e4567-e89b-42d3-a456-426614174001";
+
+    #[test]
+    fn sandbox_mode_uses_executor_platform_and_sandbox_level() {
+        use Platform::Linux;
+        use Platform::Macos;
+        use Platform::Unknown;
+        use Platform::Windows;
+        use SandboxMode::DangerFullAccess;
+        use SandboxMode::ReadOnly;
+        use SandboxMode::WorkspaceWrite;
+        use WindowsSandboxLevel::Disabled;
+        use WindowsSandboxLevel::Elevated;
+        use WindowsSandboxLevel::RestrictedToken;
+
+        for (mode, platform, level, expected) in [
+            (WorkspaceWrite, Windows, Disabled, ReadOnly),
+            (WorkspaceWrite, Windows, RestrictedToken, WorkspaceWrite),
+            (WorkspaceWrite, Windows, Elevated, WorkspaceWrite),
+            (WorkspaceWrite, Linux, Disabled, WorkspaceWrite),
+            (WorkspaceWrite, Macos, Disabled, WorkspaceWrite),
+            (WorkspaceWrite, Unknown, Disabled, WorkspaceWrite),
+            (ReadOnly, Windows, Disabled, ReadOnly),
+            (DangerFullAccess, Windows, Disabled, DangerFullAccess),
+        ] {
+            assert_eq!(
+                effective_sandbox_mode(mode, platform, level),
+                expected,
+                "{mode:?}, {platform:?}, {level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn thread_unload_delay_requires_nonnegative_seconds() {
+        for value in ["-1", "1.5", "\"60\""] {
+            let error =
+                toml::from_str::<ConfigToml>(&format!("thread_unload_delay_secs = {value}"))
+                    .expect_err("idle timeout must be a nonnegative integer");
+            assert!(error.to_string().contains("thread_unload_delay_secs"));
+        }
+    }
 
     #[test]
     fn forced_chatgpt_workspace_id_accepts_single_string() {

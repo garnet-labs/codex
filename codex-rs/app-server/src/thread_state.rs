@@ -36,6 +36,8 @@ type PendingInterruptQueue = Vec<ConnectionRequestId>;
 pub(crate) struct PendingThreadResumeRequest {
     pub(crate) request_id: ConnectionRequestId,
     pub(crate) history_items: Vec<RolloutItem>,
+    /// Usage attribution already resolved while cold-loading a paginated child.
+    pub(crate) cold_resume_token_usage_turn_id: Option<String>,
     pub(crate) config_snapshot: ThreadConfigSnapshot,
     pub(crate) instruction_sources: Vec<LegacyAppPathString>,
     pub(crate) thread_summary: codex_app_server_protocol::Thread,
@@ -55,7 +57,10 @@ pub(crate) struct PendingThreadResumeRequest {
 // ThreadListenerCommand is used to perform operations in the context of the thread listener, for serialization purposes.
 pub(crate) enum ThreadListenerCommand {
     // SendThreadResumeResponse is used to resume an already running thread by sending the thread's history to the client and atomically subscribing for new updates.
-    SendThreadResumeResponse(Box<PendingThreadResumeRequest>),
+    SendThreadResumeResponse {
+        request: Box<PendingThreadResumeRequest>,
+        completion_tx: oneshot::Sender<()>,
+    },
     // EmitThreadGoalUpdated is used to order goal updates with running-thread resume responses and goal clears.
     EmitThreadGoalUpdated {
         turn_id: Option<String>,
@@ -93,7 +98,6 @@ pub(crate) struct TurnSummary {
 #[derive(Default)]
 pub(crate) struct ThreadState {
     pub(crate) pending_interrupts: PendingInterruptQueue,
-    pub(crate) pending_rollbacks: Option<ConnectionRequestId>,
     pub(crate) turn_summary: TurnSummary,
     pub(crate) last_terminal_turn_id: Option<String>,
     /// Lets an internal runtime replacement wait until the old listener has processed Core's
@@ -159,6 +163,11 @@ impl ThreadState {
 
     pub(crate) fn active_turn_snapshot(&self) -> Option<Turn> {
         self.current_turn_history.active_turn_snapshot()
+    }
+
+    /// Returns the same turn ID as `active_turn_snapshot` without cloning its items.
+    pub(crate) fn active_turn_id(&self) -> Option<&str> {
+        self.current_turn_history.active_turn_id()
     }
 
     pub(crate) fn register_shutdown_drain_waiter(&mut self) -> oneshot::Receiver<()> {
@@ -263,6 +272,7 @@ mod tests {
 
     fn thread_settings(model: &str) -> ThreadSettings {
         ThreadSettings {
+            disabled_plugin_ids: Vec::new(),
             cwd: AbsolutePathBuf::from_absolute_path("/tmp").expect("absolute path"),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: ApprovalsReviewer::User,
@@ -454,7 +464,7 @@ impl ThreadStateManager {
                 thread_id = %thread_id,
                 listener_generation = thread_state.listener_generation,
                 had_listener = thread_state.cancel_tx.is_some(),
-                had_active_turn = thread_state.active_turn_snapshot().is_some(),
+                had_active_turn = thread_state.active_turn_id().is_some(),
                 "clearing thread listener during thread-state teardown"
             );
             thread_state.clear_listener();
@@ -478,7 +488,7 @@ impl ThreadStateManager {
                 thread_id = %thread_id,
                 listener_generation = thread_state.listener_generation,
                 had_listener = thread_state.cancel_tx.is_some(),
-                had_active_turn = thread_state.active_turn_snapshot().is_some(),
+                had_active_turn = thread_state.active_turn_id().is_some(),
                 "clearing thread listener during app-server shutdown"
             );
             thread_state.clear_listener();

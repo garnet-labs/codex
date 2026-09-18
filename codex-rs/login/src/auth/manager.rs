@@ -1,7 +1,8 @@
+mod workspace_routing;
+
 use chrono::Utc;
 use http::StatusCode;
 use serde::Deserialize;
-use serde::Serialize;
 #[cfg(test)]
 use serial_test::serial;
 use std::env;
@@ -12,7 +13,9 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::RwLock;
+use std::sync::Weak;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -36,6 +39,8 @@ use super::agent_identity::record_needs_task_registration;
 use super::agent_identity::register_managed_chatgpt_agent_identity;
 use super::agent_identity::require_agent_identity_authapi_base_url;
 use super::agent_identity::verified_record_from_jwt;
+use super::change_state::AuthChangeState;
+use super::change_state::same_owner;
 use super::external_bearer::BearerTokenRefresher;
 use super::revoke::revoke_auth_tokens;
 use super::workload_identity::WorkloadIdentityExternalAuth;
@@ -43,6 +48,7 @@ use super::workload_identity::WorkloadIdentitySessionError;
 use crate::auth::AuthHeaders;
 pub use crate::auth::agent_identity::AgentIdentityAuth;
 pub use crate::auth::agent_identity::AgentIdentityAuthError;
+pub use crate::auth::bedrock_access_keys::BedrockAccessKeysAuth;
 pub use crate::auth::bedrock_api_key::BedrockApiKeyAuth;
 pub use crate::auth::personal_access_token::PersonalAccessTokenAuth;
 pub use crate::auth::storage::AgentIdentityAuthRecord;
@@ -51,11 +57,18 @@ pub use crate::auth::storage::AuthDotJson;
 pub use crate::auth::storage::AuthKeyringBackendKind;
 use crate::auth::storage::AuthStorageBackend;
 use crate::auth::storage::create_auth_storage;
-use crate::auth::util::try_parse_error_message;
 use crate::default_client::create_client;
 use crate::default_client::create_default_auth_client;
+use crate::oauth::ErrorBodyLimit;
+use crate::oauth::OAuthClient;
+use crate::oauth::OAuthError;
+use crate::oauth::RefreshTokenGrant;
+use crate::oauth::TokenEncoding;
+use crate::oauth::TokenEndpoint;
+use crate::oauth::TokenErrorDetail;
 use crate::outbound_proxy::AuthRouteConfig;
 use crate::token_data::TokenData;
+use crate::token_data::parse_chatgpt_account_user_id;
 use crate::token_data::parse_chatgpt_jwt_claims;
 use crate::token_data::parse_jwt_expiration;
 use codex_config::ManagedAuthPolicy;
@@ -68,8 +81,11 @@ use codex_protocol::auth::PlanType as InternalPlanType;
 use codex_protocol::auth::RefreshTokenFailedError;
 use codex_protocol::auth::RefreshTokenFailedReason;
 use codex_protocol::protocol::SessionSource;
-use serde_json::Value;
 use thiserror::Error;
+pub use workspace_routing::WorkspaceRouting;
+pub use workspace_routing::WorkspaceRoutingRequest;
+pub use workspace_routing::WorkspaceRoutingResolver;
+pub use workspace_routing::WorkspaceRoutingSession;
 
 /// Authentication mechanism used by the current user.
 #[derive(Debug, Clone)]
@@ -81,6 +97,7 @@ pub enum CodexAuth {
     AgentIdentity(AgentIdentityAuth),
     PersonalAccessToken(PersonalAccessTokenAuth),
     BedrockApiKey(BedrockApiKeyAuth),
+    BedrockAccessKeys(BedrockAccessKeysAuth),
 }
 
 /// Policy for resolving Agent Identity auth from a broader Codex auth snapshot.
@@ -155,6 +172,7 @@ impl PartialEq for CodexAuth {
             (Self::Headers(a), Self::Headers(b)) => a == b,
             (Self::PersonalAccessToken(a), Self::PersonalAccessToken(b)) => a == b,
             (Self::BedrockApiKey(a), Self::BedrockApiKey(b)) => a == b,
+            (Self::BedrockAccessKeys(a), Self::BedrockAccessKeys(b)) => a == b,
             _ => self.api_auth_mode() == other.api_auth_mode(),
         }
     }
@@ -359,6 +377,14 @@ impl CodexAuth {
             };
             return Ok(Self::BedrockApiKey(auth));
         }
+        if auth_mode == AuthMode::BedrockAccessKeys {
+            let Some(auth) = auth_dot_json.bedrock_access_keys else {
+                return Err(std::io::Error::other(
+                    "Bedrock access keys auth is missing AWS access keys.",
+                ));
+            };
+            return Ok(Self::BedrockAccessKeys(auth));
+        }
         if auth_mode == AuthMode::Headers {
             return Err(std::io::Error::other(
                 "externally provided auth cannot be loaded from auth storage.",
@@ -391,6 +417,9 @@ impl CodexAuth {
                 unreachable!("personal access token mode is handled above")
             }
             AuthMode::BedrockApiKey => unreachable!("bedrock api key mode is handled above"),
+            AuthMode::BedrockAccessKeys => {
+                unreachable!("bedrock access keys mode is handled above")
+            }
         }
     }
 
@@ -473,6 +502,7 @@ impl CodexAuth {
             Self::AgentIdentity(_) => AuthMode::AgentIdentity,
             Self::PersonalAccessToken(_) => AuthMode::PersonalAccessToken,
             Self::BedrockApiKey(_) => AuthMode::BedrockApiKey,
+            Self::BedrockAccessKeys(_) => AuthMode::BedrockAccessKeys,
         }
     }
 
@@ -486,6 +516,7 @@ impl CodexAuth {
             Self::AgentIdentity(_) => AuthMode::AgentIdentity,
             Self::PersonalAccessToken(_) => AuthMode::PersonalAccessToken,
             Self::BedrockApiKey(_) => AuthMode::BedrockApiKey,
+            Self::BedrockAccessKeys(_) => AuthMode::BedrockAccessKeys,
         }
     }
 
@@ -525,7 +556,8 @@ impl CodexAuth {
             | Self::Headers(_)
             | Self::AgentIdentity(_)
             | Self::PersonalAccessToken(_)
-            | Self::BedrockApiKey(_) => None,
+            | Self::BedrockApiKey(_)
+            | Self::BedrockAccessKeys(_) => None,
         }
     }
 
@@ -557,7 +589,7 @@ impl CodexAuth {
                 "header auth does not expose a bearer token",
             )),
             Self::PersonalAccessToken(auth) => Ok(auth.access_token().to_string()),
-            Self::BedrockApiKey(_) => Err(std::io::Error::other(
+            Self::BedrockApiKey(_) | Self::BedrockAccessKeys(_) => Err(std::io::Error::other(
                 "Bedrock API key auth does not expose a Codex bearer token",
             )),
         }
@@ -612,6 +644,19 @@ impl CodexAuth {
         }
     }
 
+    /// Returns the access token's opaque account-user identity only when its workspace
+    /// matches the selected account. Missing claims never fall back to a user id.
+    /// Unlike `get_chatgpt_user_id`, this identifies one workspace membership, so keys
+    /// are not shared across a person's workspaces. Workload-identity exchange claims
+    /// describe an agent identity and cannot select a human verification credential.
+    /// This is local identity selection, not access-token or proof validation.
+    pub fn get_chatgpt_account_user_id(&self) -> Option<String> {
+        let tokens = self.get_current_token_data()?;
+        parse_chatgpt_account_user_id(&tokens.access_token, tokens.account_id.as_deref()?)
+            .ok()
+            .flatten()
+    }
+
     /// Account-facing plan classification derived from the current auth.
     /// Returns a high-level `AccountPlanType` (e.g., Free/Plus/Pro/Team/…)
     /// for UI or product decisions based on the user's subscription.
@@ -648,7 +693,8 @@ impl CodexAuth {
             | Self::Headers(_)
             | Self::AgentIdentity(_)
             | Self::PersonalAccessToken(_)
-            | Self::BedrockApiKey(_) => return None,
+            | Self::BedrockApiKey(_)
+            | Self::BedrockAccessKeys(_) => return None,
         };
         #[expect(clippy::unwrap_used)]
         state.auth_dot_json.lock().unwrap().clone()
@@ -693,7 +739,8 @@ impl CodexAuth {
             | Self::ChatgptAuthTokens(_)
             | Self::Headers(_)
             | Self::PersonalAccessToken(_)
-            | Self::BedrockApiKey(_) => Ok(None),
+            | Self::BedrockApiKey(_)
+            | Self::BedrockAccessKeys(_) => Ok(None),
             Self::Chatgpt(_) => {
                 if policy == AgentIdentityAuthPolicy::JwtOnly {
                     return Ok(None);
@@ -766,6 +813,7 @@ impl CodexAuth {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         };
 
         let state = ChatgptAuthState {
@@ -970,6 +1018,7 @@ pub fn login_with_api_key(
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        bedrock_access_keys: None,
     };
     save_auth(
         codex_home,
@@ -1003,6 +1052,7 @@ pub async fn login_with_access_token(
                 agent_identity: None,
                 personal_access_token: Some(access_token.to_string()),
                 bedrock_api_key: None,
+                bedrock_access_keys: None,
             }
         }
         CodexAccessToken::AgentIdentityJwt(jwt) => {
@@ -1021,6 +1071,7 @@ pub async fn login_with_access_token(
                 agent_identity: Some(AgentIdentityStorage::Jwt(jwt.to_string())),
                 personal_access_token: None,
                 bedrock_api_key: None,
+                bedrock_access_keys: None,
             }
         }
     };
@@ -1221,7 +1272,7 @@ fn validate_auth_restrictions(
     };
     if matches!(
         auth,
-        CodexAuth::ApiKey(_) | CodexAuth::Headers(_) | CodexAuth::BedrockApiKey(_)
+        CodexAuth::ApiKey(_) | CodexAuth::BedrockApiKey(_) | CodexAuth::BedrockAccessKeys(_)
     ) {
         return Ok(());
     }
@@ -1284,7 +1335,8 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
     if let Some(required_method) = config.forced_login_method {
         let method_violation = match (required_method, auth.auth_mode()) {
             (ForcedLoginMethod::Api, AuthMode::ApiKey)
-            | (ForcedLoginMethod::Api, AuthMode::BedrockApiKey) => None,
+            | (ForcedLoginMethod::Api, AuthMode::BedrockApiKey)
+            | (ForcedLoginMethod::Api, AuthMode::BedrockAccessKeys) => None,
             (ForcedLoginMethod::Chatgpt, AuthMode::Chatgpt)
             | (ForcedLoginMethod::Chatgpt, AuthMode::ChatgptAuthTokens)
             | (ForcedLoginMethod::Chatgpt, AuthMode::Headers)
@@ -1299,7 +1351,8 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
                     .to_string(),
             ),
             (ForcedLoginMethod::Chatgpt, AuthMode::ApiKey)
-            | (ForcedLoginMethod::Chatgpt, AuthMode::BedrockApiKey) => Some(
+            | (ForcedLoginMethod::Chatgpt, AuthMode::BedrockApiKey)
+            | (ForcedLoginMethod::Chatgpt, AuthMode::BedrockAccessKeys) => Some(
                 "ChatGPT login is required, but an API key is currently being used. Logging out."
                     .to_string(),
             ),
@@ -1317,12 +1370,14 @@ async fn enforce_login_restrictions_with_agent_identity_authapi_base_url(
 
     if let Some(expected_account_ids) = config.forced_chatgpt_workspace_id.as_deref() {
         let chatgpt_account_id = match &auth {
-            CodexAuth::ApiKey(_) | CodexAuth::Headers(_) | CodexAuth::BedrockApiKey(_) => {
+            CodexAuth::ApiKey(_)
+            | CodexAuth::BedrockApiKey(_)
+            | CodexAuth::BedrockAccessKeys(_) => {
                 return Ok(());
             }
-            CodexAuth::AgentIdentity(_) | CodexAuth::PersonalAccessToken(_) => {
-                auth.get_account_id()
-            }
+            CodexAuth::Headers(_)
+            | CodexAuth::AgentIdentity(_)
+            | CodexAuth::PersonalAccessToken(_) => auth.get_account_id(),
             CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_) => {
                 let token_data = match auth.get_token_data() {
                     Ok(data) => data,
@@ -1557,48 +1612,57 @@ async fn request_chatgpt_token_refresh(
     refresh_token: String,
     client: &HttpClient,
 ) -> Result<RefreshResponse, RefreshTokenError> {
-    let refresh_request = RefreshRequest {
-        client_id: oauth_client_id(),
-        grant_type: "refresh_token",
-        refresh_token,
-    };
+    let client_id = oauth_client_id();
     let endpoint = refresh_token_endpoint();
-
-    // Use shared client factory to include standard headers
-    let response = client
-        .post(endpoint.as_str())
-        .header("Content-Type", "application/json")
-        .json(&refresh_request)
-        .send()
+    let oauth = OAuthClient::new(
+        client,
+        TokenEndpoint {
+            url: &endpoint,
+            client_id: &client_id,
+            encoding: TokenEncoding::Json,
+            timeout: None,
+            error_body_limit: ErrorBodyLimit::Unlimited,
+        },
+    );
+    match oauth
+        .refresh(RefreshTokenGrant {
+            refresh_token: &refresh_token,
+            resource: None,
+        })
         .await
-        .map_err(|err| RefreshTokenError::Transient(std::io::Error::other(err)))?;
-
-    let status = response.status();
-    if status.is_success() {
-        let refresh_response = response
-            .json::<RefreshResponse>()
-            .await
-            .map_err(|err| RefreshTokenError::Transient(std::io::Error::other(err)))?;
-        Ok(refresh_response)
-    } else {
-        let body = response.text().await.unwrap_or_default();
-        tracing::error!("Failed to refresh token: {status}: {body}");
-        let failed = classify_refresh_token_failure(&body);
-        if status == StatusCode::UNAUTHORIZED || failed.reason != RefreshTokenFailedReason::Other {
-            Err(RefreshTokenError::Permanent(failed))
-        } else {
-            let message = try_parse_error_message(&body);
-            Err(RefreshTokenError::Transient(std::io::Error::other(
-                format!("Failed to refresh token: {status}: {message}"),
-            )))
+    {
+        Ok(response) => Ok(response),
+        Err(OAuthError::Rejected(rejection)) => {
+            let status = rejection.status;
+            let detail = &rejection.detail;
+            tracing::error!(%status, ?detail, "Failed to refresh token");
+            let code = detail.error_code();
+            let is_invalid_grant_bad_request = status == StatusCode::BAD_REQUEST
+                && code.is_some_and(|code| code.eq_ignore_ascii_case("invalid_grant"));
+            let failed = classify_refresh_token_failure(code, detail, is_invalid_grant_bad_request);
+            if status == StatusCode::UNAUTHORIZED
+                || failed.reason != RefreshTokenFailedReason::Other
+                || is_invalid_grant_bad_request
+            {
+                Err(RefreshTokenError::Permanent(failed))
+            } else {
+                Err(RefreshTokenError::Transient(std::io::Error::other(
+                    format!("Failed to refresh token: {status}: {detail}"),
+                )))
+            }
+        }
+        Err(error @ (OAuthError::Transport(_) | OAuthError::InvalidResponse)) => {
+            Err(RefreshTokenError::Transient(std::io::Error::other(error)))
         }
     }
 }
 
-fn classify_refresh_token_failure(body: &str) -> RefreshTokenFailedError {
-    let code = extract_refresh_token_error_code(body);
-
-    let normalized_code = code.as_deref().map(str::to_ascii_lowercase);
+fn classify_refresh_token_failure(
+    code: Option<&str>,
+    detail: &TokenErrorDetail,
+    is_invalid_grant_bad_request: bool,
+) -> RefreshTokenFailedError {
+    let normalized_code = code.map(str::to_ascii_lowercase);
     let reason = match normalized_code.as_deref() {
         Some("refresh_token_expired") => RefreshTokenFailedReason::Expired,
         Some("refresh_token_reused") => RefreshTokenFailedReason::Exhausted,
@@ -1606,10 +1670,9 @@ fn classify_refresh_token_failure(body: &str) -> RefreshTokenFailedError {
         _ => RefreshTokenFailedReason::Other,
     };
 
-    if reason == RefreshTokenFailedReason::Other {
+    if reason == RefreshTokenFailedReason::Other && !is_invalid_grant_bad_request {
         tracing::warn!(
-            backend_code = normalized_code.as_deref(),
-            backend_body = body,
+            backend_detail = ?detail,
             "Encountered unknown response while refreshing token"
         );
     }
@@ -1622,39 +1685,6 @@ fn classify_refresh_token_failure(body: &str) -> RefreshTokenFailedError {
     };
 
     RefreshTokenFailedError::new(reason, message)
-}
-
-fn extract_refresh_token_error_code(body: &str) -> Option<String> {
-    if body.trim().is_empty() {
-        return None;
-    }
-
-    let Value::Object(map) = serde_json::from_str::<Value>(body).ok()? else {
-        return None;
-    };
-
-    if let Some(error_value) = map.get("error") {
-        match error_value {
-            Value::Object(obj) => {
-                if let Some(code) = obj.get("code").and_then(Value::as_str) {
-                    return Some(code.to_string());
-                }
-            }
-            Value::String(code) => {
-                return Some(code.to_string());
-            }
-            _ => {}
-        }
-    }
-
-    map.get("code").and_then(Value::as_str).map(str::to_string)
-}
-
-#[derive(Serialize)]
-struct RefreshRequest {
-    client_id: String,
-    grant_type: &'static str,
-    refresh_token: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -1707,6 +1737,7 @@ impl AuthDotJson {
             agent_identity: None,
             personal_access_token: None,
             bedrock_api_key: None,
+            bedrock_access_keys: None,
         })
     }
 
@@ -1719,6 +1750,9 @@ impl AuthDotJson {
         }
         if self.bedrock_api_key.is_some() {
             return AuthMode::BedrockApiKey;
+        }
+        if self.bedrock_access_keys.is_some() {
+            return AuthMode::BedrockAccessKeys;
         }
         if self.openai_api_key.is_some() {
             return AuthMode::ApiKey;
@@ -1846,7 +1880,7 @@ impl UnauthorizedRecovery {
     }
 
     pub fn has_next(&self) -> bool {
-        if self.manager.has_external_api_key_auth() {
+        if self.manager.has_refreshable_external_auth() {
             return !matches!(self.step, UnauthorizedRecoveryStep::Done);
         }
 
@@ -1867,7 +1901,7 @@ impl UnauthorizedRecovery {
     }
 
     pub fn unavailable_reason(&self) -> &'static str {
-        if self.manager.has_external_api_key_auth() {
+        if self.manager.has_refreshable_external_auth() {
             return if matches!(self.step, UnauthorizedRecoveryStep::Done) {
                 "recovery_exhausted"
             } else {
@@ -1990,6 +2024,8 @@ pub struct AuthManager {
     codex_home: PathBuf,
     inner: RwLock<CachedAuth>,
     auth_change_tx: watch::Sender<u64>,
+    auth_change_state_tx: watch::Sender<AuthChangeState>,
+    workspace_routing_resolver: OnceLock<Weak<dyn WorkspaceRoutingResolver>>,
     enable_codex_api_key_env: bool,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
@@ -2126,6 +2162,8 @@ impl AuthManager {
                 permanent_refresh_failure: None,
             }),
             auth_change_tx,
+            auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
+            workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env,
             auth_credentials_store_mode,
             keyring_backend_kind,
@@ -2160,6 +2198,8 @@ impl AuthManager {
             codex_home: PathBuf::from("non-existent"),
             inner: RwLock::new(cached),
             auth_change_tx,
+            auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
+            workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
@@ -2188,6 +2228,8 @@ impl AuthManager {
             codex_home,
             inner: RwLock::new(cached),
             auth_change_tx,
+            auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
+            workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
@@ -2220,6 +2262,8 @@ impl AuthManager {
             codex_home: PathBuf::from("non-existent"),
             inner: RwLock::new(cached),
             auth_change_tx,
+            auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
+            workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
@@ -2250,6 +2294,8 @@ impl AuthManager {
                 permanent_refresh_failure: None,
             }),
             auth_change_tx,
+            auth_change_state_tx: watch::channel(AuthChangeState::default()).0,
+            workspace_routing_resolver: OnceLock::new(),
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
@@ -2282,6 +2328,11 @@ impl AuthManager {
     /// Subscribes to cached auth changes that can affect request recovery.
     pub fn auth_change_receiver(&self) -> watch::Receiver<u64> {
         self.auth_change_tx.subscribe()
+    }
+
+    /// Subscribes to credential and owner revisions published together, including when changes coalesce.
+    pub fn auth_change_state_receiver(&self) -> watch::Receiver<AuthChangeState> {
+        self.auth_change_state_tx.subscribe()
     }
 
     pub fn refresh_failure_for_auth(&self, auth: &CodexAuth) -> Option<RefreshTokenFailedError> {
@@ -2439,6 +2490,7 @@ impl AuthManager {
                 },
                 (AuthMode::PersonalAccessToken, AuthMode::PersonalAccessToken) => a == b,
                 (AuthMode::BedrockApiKey, AuthMode::BedrockApiKey) => a == b,
+                (AuthMode::BedrockAccessKeys, AuthMode::BedrockAccessKeys) => a == b,
                 _ => false,
             },
             _ => false,
@@ -2530,12 +2582,20 @@ impl AuthManager {
             let changed = !AuthManager::auths_equal(previous, new_auth.as_ref());
             let auth_changed_for_refresh =
                 !Self::auths_equal_for_refresh(previous, new_auth.as_ref());
+            let owner_changed =
+                auth_changed_for_refresh && !same_owner(previous, new_auth.as_ref());
             if auth_changed_for_refresh {
                 guard.permanent_refresh_failure = None;
             }
             tracing::info!("Reloaded auth, changed: {changed}");
             guard.auth = new_auth;
             if auth_changed_for_refresh {
+                self.auth_change_state_tx.send_modify(|state| {
+                    state.generation += 1;
+                    if owner_changed {
+                        state.owner_generation += 1;
+                    }
+                });
                 self.auth_change_tx.send_modify(|revision| *revision += 1);
             }
             changed
@@ -2611,7 +2671,8 @@ impl AuthManager {
         )
     }
 
-    fn allowed_login_methods(&self) -> Vec<ForcedLoginMethod> {
+    /// Returns the login methods permitted by the current effective authentication policy.
+    pub fn allowed_login_methods(&self) -> Vec<ForcedLoginMethod> {
         self.managed_auth_policy.allowed_login_methods(
             self.forced_login_method,
             self.forced_chatgpt_workspace_id().as_deref(),
@@ -2696,12 +2757,12 @@ impl AuthManager {
             .and_then(|external_auth| external_auth.clone())
     }
 
-    fn has_external_api_key_auth(&self) -> bool {
+    fn has_refreshable_external_auth(&self) -> bool {
         self.has_external_auth()
             && self
                 .auth_cached()
                 .as_ref()
-                .is_some_and(CodexAuth::is_api_key_auth)
+                .is_none_or(|auth| auth.is_api_key_auth() || auth.supports_unauthorized_recovery())
     }
 
     async fn resolve_external_auth(
@@ -2772,39 +2833,44 @@ impl AuthManager {
     async fn refresh_token_from_authority_impl(&self) -> Result<(), RefreshTokenError> {
         tracing::info!("Refreshing token");
 
-        let auth = match self.auth_cached() {
-            Some(auth) => auth,
-            None => return Ok(()),
-        };
-        if let Some(error) = self.refresh_failure_for_auth(&auth) {
+        let attempted_auth = self.auth_cached();
+        if let Some(error) = attempted_auth
+            .as_ref()
+            .and_then(|auth| self.refresh_failure_for_auth(auth))
+        {
             return Err(RefreshTokenError::Permanent(error));
         }
 
-        let attempted_auth = auth.clone();
         let result = if self.has_external_auth() {
             self.refresh_external_auth(ExternalAuthRefreshReason::Unauthorized)
                 .await
         } else {
-            match auth {
-                CodexAuth::Chatgpt(chatgpt_auth) => {
+            match attempted_auth.as_ref() {
+                Some(CodexAuth::Chatgpt(chatgpt_auth)) => {
                     let token_data = chatgpt_auth.current_token_data().ok_or_else(|| {
                         RefreshTokenError::Transient(std::io::Error::other(
                             "Token data is not available.",
                         ))
                     })?;
-                    self.refresh_and_persist_chatgpt_token(&chatgpt_auth, token_data.refresh_token)
+                    self.refresh_and_persist_chatgpt_token(chatgpt_auth, token_data.refresh_token)
                         .await
                 }
-                CodexAuth::ApiKey(_)
-                | CodexAuth::ChatgptAuthTokens(_)
-                | CodexAuth::Headers(_)
-                | CodexAuth::AgentIdentity(_)
-                | CodexAuth::PersonalAccessToken(_)
-                | CodexAuth::BedrockApiKey(_) => Ok(()),
+                Some(
+                    CodexAuth::ApiKey(_)
+                    | CodexAuth::ChatgptAuthTokens(_)
+                    | CodexAuth::Headers(_)
+                    | CodexAuth::AgentIdentity(_)
+                    | CodexAuth::PersonalAccessToken(_)
+                    | CodexAuth::BedrockApiKey(_)
+                    | CodexAuth::BedrockAccessKeys(_),
+                )
+                | None => Ok(()),
             }
         };
-        if let Err(RefreshTokenError::Permanent(error)) = &result {
-            self.record_permanent_refresh_failure_if_unchanged(&attempted_auth, error);
+        if let Some(attempted_auth) = attempted_auth.as_ref()
+            && let Err(RefreshTokenError::Permanent(error)) = &result
+        {
+            self.record_permanent_refresh_failure_if_unchanged(attempted_auth, error);
         }
         result
     }
@@ -2995,3 +3061,11 @@ fn auth_config_from(config: &impl AuthManagerConfig) -> AuthConfig {
 #[cfg(test)]
 #[path = "auth_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "change_state_tests.rs"]
+mod change_state_tests;
+
+#[cfg(test)]
+#[path = "account_user_id_tests.rs"]
+mod account_user_id_tests;
