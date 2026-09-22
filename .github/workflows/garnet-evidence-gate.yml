@@ -8,7 +8,7 @@ name: Garnet evidence gate
 
 on: # zizmor: ignore[dangerous-triggers] default branch only, no pull request code runs here
   workflow_run:
-    workflows: ["blocking-ci"]
+    workflows: ["blocking-ci","Garnet runtime coverage"]
     types: [completed]
 
 permissions: {}
