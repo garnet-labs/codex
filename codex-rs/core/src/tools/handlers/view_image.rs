@@ -15,12 +15,15 @@ use serde::Deserialize;
 
 use crate::function_tool::FunctionCallError;
 use crate::original_image_detail::can_request_original_image_detail;
+use crate::tools::context::ToolEnvironments;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::context::boxed_tool_output;
+use crate::tools::handlers::ToolEnvironmentArgs;
+use crate::tools::handlers::function_tool_environment;
 use crate::tools::handlers::parse_arguments;
-use crate::tools::handlers::resolve_tool_environment;
+use crate::tools::handlers::selected_executor;
 use crate::tools::handlers::view_image_spec::ViewImageToolOptions;
 use crate::tools::handlers::view_image_spec::create_view_image_tool;
 use crate::tools::registry::CoreToolRuntime;
@@ -58,8 +61,6 @@ const VIEW_IMAGE_INVALID_MESSAGE: &str =
 #[derive(Deserialize)]
 struct ViewImageArgs {
     path: String,
-    #[serde(default)]
-    environment_id: Option<String>,
     detail: Option<String>,
 }
 
@@ -108,6 +109,7 @@ impl ViewImageHandler {
         }
 
         let ToolInvocation {
+            environments,
             session,
             turn,
             step_context,
@@ -125,11 +127,7 @@ impl ViewImageHandler {
             }
         };
 
-        let ViewImageArgs {
-            path,
-            environment_id,
-            detail,
-        } = parse_arguments(&arguments)?;
+        let ViewImageArgs { path, detail } = parse_arguments(&arguments)?;
         // Keep accepting previously supported detail hints after they disappear from the schema.
         let detail = match detail.as_deref() {
             None => None,
@@ -142,13 +140,7 @@ impl ViewImageHandler {
             }
         };
 
-        let Some(turn_environment) =
-            resolve_tool_environment(&step_context.environments, environment_id.as_deref())?
-        else {
-            return Err(FunctionCallError::RespondToModel(
-                "view_image is unavailable in this session".to_string(),
-            ));
-        };
+        let turn_environment = selected_executor(&environments, &step_context.environments)?;
         let path_uri = turn_environment.cwd().join(&path).map_err(|err| {
             FunctionCallError::RespondToModel(format!(
                 "unable to resolve image path `{path}` against environment cwd `{}`: {err}",
@@ -216,6 +208,13 @@ impl ViewImageHandler {
 }
 
 impl CoreToolRuntime for ViewImageHandler {
+    fn environments_for_input(
+        &self,
+        invocation: &ToolInvocation,
+    ) -> Result<ToolEnvironments, FunctionCallError> {
+        function_tool_environment(invocation, |args: ToolEnvironmentArgs| args.environment_id)
+    }
+
     fn is_builtin_control_tool(&self) -> bool {
         true
     }
@@ -297,7 +296,7 @@ mod tests {
 
     fn replace_primary_environment_cwd(turn: &mut crate::TurnContext, cwd: AbsolutePathBuf) {
         let mut current = turn
-            .environments
+            .initial_environments
             .turn_environments()
             .next()
             .cloned()
@@ -306,12 +305,13 @@ mod tests {
         let mut selection = current.selection;
         selection.cwd = PathUri::from_abs_path(&cwd);
         selection.workspace_roots.clear();
-        turn.environments.environments[0] = TurnEnvironmentState::Ready(TurnEnvironment::new(
-            selection,
-            current.config_origin,
-            current.environment,
-            current.shell,
-        ));
+        turn.initial_environments.environments[0] =
+            TurnEnvironmentState::Ready(TurnEnvironment::new(
+                selection,
+                current.config_origin,
+                current.environment,
+                current.shell,
+            ));
     }
 
     fn tiny_png() -> Vec<u8> {
@@ -372,7 +372,8 @@ mod tests {
             .permissions
             .set_permission_profile(PermissionProfile::Disabled)
             .expect("set thread permission profile");
-        let TurnEnvironmentState::Ready(environment) = &mut turn.environments.environments[0]
+        let TurnEnvironmentState::Ready(environment) =
+            &mut turn.initial_environments.environments[0]
         else {
             panic!("primary environment should be ready");
         };
@@ -396,6 +397,7 @@ mod tests {
                 call_id: "call-view-image".to_string(),
                 tool_name: codex_tools::ToolName::plain("view_image"),
                 source: ToolCallSource::Direct,
+                environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({ "path": "image.png" }).to_string(),
                 },
@@ -426,6 +428,7 @@ mod tests {
                 call_id: "call-view-image".to_string(),
                 tool_name: codex_tools::ToolName::plain("view_image"),
                 source: ToolCallSource::Direct,
+                environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({ "path": "image.png", "detail": "low" }).to_string(),
                 },
@@ -450,7 +453,8 @@ mod tests {
         replace_primary_environment_cwd(&mut turn, image_cwd.clone());
         let image_path = image_cwd.join("image.png");
         std::fs::write(image_path.as_path(), tiny_png()).expect("write test image");
-        let TurnEnvironmentState::Ready(environment) = &mut turn.environments.environments[0]
+        let TurnEnvironmentState::Ready(environment) =
+            &mut turn.initial_environments.environments[0]
         else {
             panic!("primary environment should be ready");
         };
@@ -468,6 +472,7 @@ mod tests {
                 call_id: "call-view-image".to_string(),
                 tool_name: codex_tools::ToolName::plain("view_image"),
                 source: ToolCallSource::Direct,
+                environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({ "path": "image.png", "detail": "high" }).to_string(),
                 },
@@ -487,7 +492,8 @@ mod tests {
         let image_path = image_cwd.join("not-an-image.txt");
         std::fs::write(image_path.as_path(), b"arbitrary file contents")
             .expect("write invalid image");
-        let TurnEnvironmentState::Ready(environment) = &mut turn.environments.environments[0]
+        let TurnEnvironmentState::Ready(environment) =
+            &mut turn.initial_environments.environments[0]
         else {
             panic!("primary environment should be ready");
         };
@@ -508,6 +514,7 @@ mod tests {
                     cell_id: "cell-1".to_string(),
                     runtime_tool_call_id: "tool-1".to_string(),
                 },
+                environments: Default::default(),
                 payload: ToolPayload::Function {
                     arguments: json!({ "path": "not-an-image.txt" }).to_string(),
                 },

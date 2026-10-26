@@ -271,6 +271,7 @@ async fn workspace_roots_allow_file_and_command_writes_in_secondary_root(
             .environment_ready(
                 &selection,
                 EnvironmentConfig {
+                    environment_hooks: Default::default(),
                     allow_login_shell: test.config.permissions.allow_login_shell,
                     workspace_roots: vec![selection.cwd.clone(), secondary_root.clone()],
                     permission_profile: PermissionProfileSnapshot::legacy(
@@ -279,10 +280,6 @@ async fn workspace_roots_allow_file_and_command_writes_in_secondary_root(
                     shell_environment_policy: Default::default(),
                     windows_sandbox_level: WindowsSandboxLevel::RestrictedToken,
                     windows_sandbox_type: SandboxType::WindowsRestrictedToken,
-                    windows_sandbox_private_desktop: test
-                        .config
-                        .permissions
-                        .windows_sandbox_private_desktop,
                     use_legacy_landlock: test.config.features.use_legacy_landlock(),
                     exec_policy: None,
                     mcp_policy: None,
@@ -347,7 +344,7 @@ async fn workspace_roots_allow_file_and_command_writes_in_secondary_root(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn workspace_roots_allow_patches_but_protect_metadata_directories() -> Result<()> {
     const PATCH_CONTENTS: &str = "workspace root patch access";
-    const PROTECTED_METADATA_DIRECTORIES: [&str; 3] = [".git", ".agents", ".codex"];
+    const PROTECTED_METADATA_DIRECTORIES: [&str; 4] = [".git", ".agents", ".codex", ".aws"];
 
     skip_if_wine_exec!(
         Ok(()),
