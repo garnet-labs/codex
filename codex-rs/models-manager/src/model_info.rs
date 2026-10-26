@@ -46,7 +46,6 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
     if let Some(base_instructions) = &config.base_instructions {
         let model_messages = model.model_messages.get_or_insert_default();
         model_messages.instructions_template = Some(base_instructions.clone());
-        model_messages.instructions_variables = None;
     } else if config.personality == Some(Personality::None)
         && let Some(instructions_template) = model
             .model_messages
@@ -137,6 +136,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         supports_search_tool: false,
         supports_experimental_context: false,
         use_responses_lite: false,
+        supports_reasoning_effort_updates: false,
         guardian: None,
         node_repl_auto_review_required: false,
         node_repl_disabled: false,
