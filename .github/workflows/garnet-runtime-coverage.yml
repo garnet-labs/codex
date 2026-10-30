@@ -47,7 +47,7 @@ jobs:
           ref: ${{ inputs.checkout_ref || github.event.pull_request.head.sha || github.sha }}
 
       - name: Garnet Runtime Review
-        uses: garnet-org/action@8cccc85403e4ac4e05fb7822c994d3c199f9aa57 # v2.4.0
+        uses: garnet-org/action@96e9f81ec0f59f2322e8c67b43c4d4017d932ad3 # v2.4.1
         with:
           api_token: ${{ secrets.GARNET_API_TOKEN }}
           jibril_version: v2.15.0
@@ -82,7 +82,7 @@ jobs:
           ref: ${{ inputs.checkout_ref }}
 
       - name: Garnet Runtime Review
-        uses: garnet-org/action@8cccc85403e4ac4e05fb7822c994d3c199f9aa57 # v2.4.0
+        uses: garnet-org/action@96e9f81ec0f59f2322e8c67b43c4d4017d932ad3 # v2.4.1
         with:
           api_token: ${{ secrets.GARNET_API_TOKEN }}
           jibril_version: v2.15.0
