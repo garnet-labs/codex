@@ -1,0 +1,74 @@
+name: garnet-sensor-diag
+
+on:
+  push:
+    branches:
+      - devin/sensor-start-diag
+
+jobs:
+  diag:
+    name: sensor start (${{ matrix.label }})
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: v2.15.0 on ubuntu-24.04
+            runs_on: ubuntu-24.04
+            jibril: v2.15.0
+          - label: v2.15.0 on ubuntu-latest
+            runs_on: ubuntu-latest
+            jibril: v2.15.0
+          - label: v2.16.0 on ubuntu-24.04
+            runs_on: ubuntu-24.04
+            jibril: v2.16.0
+          - label: latest on ubuntu-24.04
+            runs_on: ubuntu-24.04
+            jibril: latest
+          - label: v2.15.0 after full checkout
+            runs_on: ubuntu-24.04
+            jibril: v2.15.0
+            fetch_depth: 0
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: ${{ matrix.fetch_depth || 1 }}
+          persist-credentials: false
+
+      - name: Kernel and runner facts
+        shell: bash
+        run: |
+          uname -a
+          cat /etc/os-release | head -3
+          ls -la /sys/kernel/btf/vmlinux || echo "no BTF"
+          nproc; free -m; df -h /
+          systemctl --version | head -1
+          ls /sys/fs/bpf || true
+          sudo bpftool prog show 2>/dev/null | tail -20 || echo "bpftool unavailable"
+
+      - name: Garnet Runtime Review
+        uses: garnet-org/action@3d47f4a9004f7356c980a0e8d420ef5984750e3c # v2.2.0
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+          jibril_version: ${{ matrix.jibril }}
+
+      - name: Sensor state
+        if: always()
+        shell: bash
+        run: |
+          echo "=== systemctl is-active"
+          systemctl is-active jibril.service || true
+          echo "=== systemctl status"
+          sudo systemctl status jibril.service --no-pager -l || true
+          echo "=== journalctl"
+          sudo journalctl -xeu jibril.service --no-pager | tail -200 || true
+          echo "=== jibril config"
+          sudo cat /etc/jibril/config.yaml || true
+          echo "=== loaded bpf programs"
+          sudo bpftool prog show 2>/dev/null | tail -30 || echo "bpftool unavailable"
+
+      - name: Do a little work to record
+        shell: bash
+        run: |
+          curl -sS -o /dev/null https://pypi.org/simple/ || true
+          git ls-remote https://github.com/garnet-labs/codex HEAD >/dev/null || true
