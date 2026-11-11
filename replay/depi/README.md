@@ -58,6 +58,8 @@ commit → merge PR → delete the fake release.
 | Workflow planting via git trees with the job token | article | blocked by GitHub (job token) — pre-planted via this PR instead |
 | npm publish with the OIDC token | article | not attempted — no trust policy on this fork; chain ends at JWT capture |
 | Agent decision (prompt injection → shell) | article | simulated — fork has no `CODEX_OPENAI_API_KEY`; payload replayed exactly |
+| Runtime token source inside the victim job | article (Runner.Worker memory) | exact — and load-bearing: the current runner image (20261101.360) exposes neither `ACTIONS_RUNTIME_TOKEN` nor `ACTIONS_CACHE_URL` in step env (verified by the stage-1 calibration probe), so the memory read is the only source; stage 2's own-token fallback does not exist and was removed |
+| `gh` inside the poisoned rust-ci step | article (final script runs `gh api`) | the job token is likewise absent from step env, so `test_depi.py` performs its own debug-pipe memory read for `GITHUB_TOKEN` before running the release script |
 | `github.repository == 'openai/codex'` gate on the labeler | this fork's copy | replaced by the stage-1 replay workflow |
 
 ## Garnet questions this replay answers
