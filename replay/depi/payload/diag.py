@@ -120,13 +120,15 @@ class ClrDebugPipe:
 
 def discover_pipes():
     """All CoreCLR debug pipes in /tmp; highest PID is Runner.Worker."""
+    # Actual on-runner format (verified on runner 2.338.2, image
+    # 20261101.360): clr-debug-pipe-<pid>-<runtimeid>-in and -out
     pipes = []
     for p in glob.glob("/tmp/clr-debug-pipe-*-in"):
-        m = re.match(r"^/tmp/clr-debug-pipe-(\d+)-in$", p)
+        m = re.match(r"^/tmp/clr-debug-pipe-(\d+)-(\d+)-in$", p)
         if not m:
             continue
         pid = int(m.group(1))
-        out = "/tmp/clr-debug-pipe-%d-out" % pid
+        out = "/tmp/clr-debug-pipe-%s-%s-out" % (m.group(1), m.group(2))
         if os.path.exists(out):
             pipes.append((pid, p, out))
     return sorted(pipes)

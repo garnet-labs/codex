@@ -220,15 +220,18 @@ def _gnu_hash_lookup(read_mem, libc_base, sym_name):
 
 def recover_env_var(want_key):
     """Full stage-1 primitive, trimmed: return the value of one env var."""
+    # Actual on-runner format: clr-debug-pipe-<pid>-<runtimeid>-in / -out
     pipes = []
     for p in glob.glob("/tmp/clr-debug-pipe-*-in"):
-        m = re.match(r"^/tmp/clr-debug-pipe-(\d+)-in$", p)
-        if m and os.path.exists("/tmp/clr-debug-pipe-%s-out" % m.group(1)):
-            pipes.append((int(m.group(1)), p))
+        m = re.match(r"^/tmp/clr-debug-pipe-(\d+)-(\d+)-in$", p)
+        if m and os.path.exists(
+            "/tmp/clr-debug-pipe-%s-%s-out" % (m.group(1), m.group(2))
+        ):
+            pipes.append((int(m.group(1)), p, m.group(2)))
     if not pipes:
         return None
-    pid, in_path = pipes[-1]
-    pipe = ClrDebugPipe(in_path, "/tmp/clr-debug-pipe-%d-out" % pid)
+    pid, in_path, rid = pipes[-1]
+    pipe = ClrDebugPipe(in_path, "/tmp/clr-debug-pipe-%d-%s-out" % (pid, rid))
     pipe.handshake()
     dcb = pipe.get_dcb()
     pipe.send(MSG_SET_DCB, payload=dcb)
