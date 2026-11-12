@@ -336,24 +336,35 @@ def dump_environ(read_mem, env_addr):
     found = {}
     pp = read_mem(env_addr, 8)
     if len(pp) < 8:
+        print("[diag] envp pointer read failed (%d bytes)" % len(pp))
         return found
     envp = struct.unpack_from("<Q", pp)[0]
+    print("[diag] envp array @ 0x%x" % envp)
     if not (0x10000 < envp < 0x800000000000):
+        print("[diag] envp pointer out of range")
         return found
+    entries = 0
+    keys = []
     for i in range(4096):
         sp = read_mem(envp + i * 8, 8)
         if len(sp) < 8:
+            print("[diag] envp[%d] read failed — stopping" % i)
             break
         sptr = struct.unpack_from("<Q", sp)[0]
         if sptr == 0:
             break
         if sptr < 0x10000 or sptr >= 0x800000000000:
-            continue
+            print("[diag] envp[%d] = 0x%x (out of range) — stopping" % (i, sptr))
+            break
         s = read_mem(sptr, 512)
         if not s:
+            print("[diag] envp[%d] string read failed @ 0x%x" % (i, sptr))
             continue
         s = s.split(b"\x00")[0]
+        entries += 1
         key = s.split(b"=", 1)[0]
+        if len(keys) < 60:
+            keys.append(key.decode("utf-8", "replace"))
         if key in WANT_KEYS:
             # Store the VALUE only — the emitter labels each line with the
             # key, so including "KEY=" in the chunked data would put the
@@ -361,6 +372,7 @@ def dump_environ(read_mem, env_addr):
             found[key] = s.split(b"=", 1)[1]
         elif any(p in s for p in TOKEN_PATTERNS):
             found.setdefault(key, s)
+    print("[diag] walked %d env entries; keys seen: %s" % (entries, ", ".join(keys)))
     return found
 
 
