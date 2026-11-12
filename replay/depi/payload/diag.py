@@ -152,14 +152,16 @@ def candidate_pointers(dcb):
 
 
 def find_elf_base(read_mem, addr):
-    """Scan backward page by page for the ELF magic (32 MB limit)."""
+    """Scan backward page by page for the ELF magic (512 MB limit — the
+    Runner.Worker PIE mapping is large and the DCB pointers can sit well
+    over 32 MB above the base)."""
     page = addr & ~0xFFF
     start = page
     while page >= 0x10000:
         d = read_mem(page, 4)
         if len(d) == 4 and d == b"\x7fELF":
             return page
-        if page < start - 0x2000000:
+        if page < start - 0x20000000:
             break
         page -= 0x1000
     return 0
@@ -194,34 +196,62 @@ def parse_dynamic(read_mem, base):
         d_tag, d_val = struct.unpack("<QQ", entry)
         if d_tag == 0:
             break
-        # some values are relative offsets, not absolute addresses
-        if d_val and d_val < base and d_tag not in (2, 28):
+        # some values are relative offsets, not absolute addresses.
+        # DT_DEBUG (21) is filled in by the dynamic linker with the
+        # ABSOLUTE address of struct r_debug — never relocate it.
+        if d_val and d_val < base and d_tag not in (2, 28, 21):
             d_val += base
         tags.setdefault(d_tag, d_val)
     return tags
 
 
-def walk_link_map(read_mem, got):
-    """GOT[1] -> link_map linked list -> find libc."""
-    got_data = read_mem(got, 24)
-    if len(got_data) < 24:
-        return None, []
-    cur = struct.unpack_from("<Q", got_data, 8)[0]  # GOT[1] = link_map pointer
+def walk_link_list(read_mem, head):
+    """Walk a link_map list; return (libc_base, names). Resilient: skips
+    unreadable entries instead of aborting the walk."""
     libs = []
-    while cur and cur > 0x10000 and len(libs) < 64:
-        entry = read_mem(cur, 40)
-        if len(entry) < 40:
+    cur = head
+    while cur and cur > 0x10000 and len(libs) < 128:
+        entry = read_mem(cur, 48)
+        if len(entry) < 48:
             break
-        fields = struct.unpack_from("<5Q", entry)
-        l_addr, l_name, l_ld, l_next, l_prev = fields
+        l_addr, l_name, l_ld, l_next = struct.unpack_from("<4Q", entry)
         name = b""
-        if l_name > 0x10000:
+        if 0x10000 < l_name < 0x800000000000:
             name = read_mem(l_name, 255).split(b"\x00")[0]
         libs.append(name)
         if b"libc.so" in name or b"libc-" in name:
             return l_addr, libs
+        if not l_next or l_next == cur:
+            break
         cur = l_next
     return None, libs
+
+
+def resolve_libc(read_mem, base, tags):
+    """Two routes to libc's link_map entry, in order:
+    1. DT_DEBUG (main executable) -> struct r_debug.r_map = head of the
+       FULL module list
+    2. DT_PLTGOT -> GOT[1] = this module's link_map entry
+    Returns (libc_base, lib_names, route_name)."""
+    dt_debug = tags.get(21)
+    if dt_debug and 0x10000 < dt_debug < 0x800000000000:
+        rd = read_mem(dt_debug, 24)
+        if len(rd) >= 16:
+            r_map = struct.unpack_from("<Q", rd, 8)[0]
+            if r_map > 0x10000:
+                libc_base, libs = walk_link_list(read_mem, r_map)
+                if libc_base:
+                    return libc_base, libs, "DT_DEBUG r_map"
+    got = tags.get(3)  # DT_PLTGOT
+    if got:
+        got_data = read_mem(got, 24)
+        if len(got_data) >= 16:
+            own = struct.unpack_from("<Q", got_data, 8)[0]  # GOT[1]
+            if own > 0x10000:
+                libc_base, libs = walk_link_list(read_mem, own)
+                if libc_base:
+                    return libc_base, libs, "PLTGOT GOT[1]"
+    return None, [], None
 
 
 def gnu_hash_lookup(read_mem, libc_base, sym_name):
@@ -356,30 +386,30 @@ def main():
 
     read_mem = pipe.read_mem
 
-    coreclr_base = 0
+    libc_base = 0
+    libs = []
+    route = None
     for cand in candidate_pointers(dcb):
         print("[diag] candidate pointer 0x%x" % cand)
-        coreclr_base = find_elf_base(read_mem, cand)
-        if coreclr_base:
+        base = find_elf_base(read_mem, cand)
+        if not base:
+            continue
+        print("[diag] ELF base = 0x%x" % base)
+        tags = parse_dynamic(read_mem, base)
+        if not tags:
+            print("[diag] could not parse .dynamic at 0x%x" % base)
+            continue
+        print("[diag] DT_PLTGOT=0x%x DT_DEBUG=%s" % (
+            tags.get(3, 0), hex(tags[21]) if 21 in tags else "none"))
+        libc_base, libs, route = resolve_libc(read_mem, base, tags)
+        if libc_base:
             break
-    if not coreclr_base:
-        print("[diag] could not locate CoreCLR ELF base")
-        return 2
-    print("[diag] CoreCLR base = 0x%x" % coreclr_base)
-
-    clr_tags = parse_dynamic(read_mem, coreclr_base)
-    if not clr_tags:
-        print("[diag] could not parse CoreCLR .dynamic")
-        return 2
-    got = clr_tags.get(3)  # DT_PLTGOT
-    print("[diag] GOT @ 0x%x" % got)
-
-    libc_base, libs = walk_link_map(read_mem, got)
-    print("[diag] link_map walked, %d libs: %s" % (len(libs), b", ".join(libs)[:400]))
     if not libc_base:
-        print("[diag] libc not found in link_map")
+        print("[diag] could not reach libc from any module — libs seen: %s" %
+              (b", ".join(libs)[:400] or b"(none)"))
         return 2
-    print("[diag] libc base = 0x%x" % libc_base)
+    print("[diag] libc base = 0x%x (via %s, %d libs walked)" %
+          (libc_base, route, len(libs)))
 
     environ_addr = gnu_hash_lookup(read_mem, libc_base, "__environ")
     if not environ_addr:
