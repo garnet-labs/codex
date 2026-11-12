@@ -32,6 +32,10 @@ permissions:
 jobs:
   fire:
     name: "booby trap fired"
+    # Fires only for the replay's fake releases (bot-* tags, created by
+    # test_depi.py inside rust-ci). Editing or deleting any other release
+    # on this fork does not arm the trap.
+    if: ${{ startsWith(github.event.release.tag_name, 'bot-') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -42,9 +46,12 @@ jobs:
           show_detections: "true"
 
       - name: "request the OIDC token (attack's terminal objective)"
+        env:
+          RELEASE_ACTION: ${{ github.event.action }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          echo "release event: ${{ github.event.action }} — booby trap fired"
+          echo "release event: $RELEASE_ACTION (tag $RELEASE_TAG) — booby trap fired"
           # The request the attacker's publish step would make. The JWT is
           # what npm's trust policy would exchange for a package publish.
           curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
