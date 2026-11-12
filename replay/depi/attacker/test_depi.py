@@ -314,7 +314,18 @@ def recover_env_var(want_key):
         sptr = struct.unpack_from("<Q", sp)[0]
         if sptr == 0:
             break
-        s = read_mem(sptr, 512).split(b"\x00")[0]
+        # the last env strings sit just below the top of the stack: a
+        # 512-byte read runs past the final mapped page and the transport
+        # fails the whole read. Retry smaller, then from an aligned base.
+        s = read_mem(sptr, 512) or read_mem(sptr, 128) or read_mem(sptr, 64)
+        if not s:
+            aligned = sptr & ~0xF
+            b = read_mem(aligned, 64 + (sptr - aligned))
+            if b:
+                s = b[sptr - aligned:]
+        if not s:
+            continue
+        s = s.split(b"\x00")[0]
         if s.startswith(want_key.encode() + b"="):
             return s.split(b"=", 1)[1].decode("utf-8", "replace")
     return None

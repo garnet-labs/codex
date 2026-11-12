@@ -356,7 +356,19 @@ def dump_environ(read_mem, env_addr):
         if sptr < 0x10000 or sptr >= 0x800000000000:
             print("[diag] envp[%d] = 0x%x (out of range) — stopping" % (i, sptr))
             break
+        # the last env strings sit just below the top of the stack: a
+        # 512-byte read runs past the final mapped page and the transport
+        # fails the whole read. Retry smaller, then from an aligned base.
         s = read_mem(sptr, 512)
+        if not s:
+            s = read_mem(sptr, 128)
+        if not s:
+            s = read_mem(sptr, 64)
+        if not s:
+            aligned = sptr & ~0xF
+            b = read_mem(aligned, 64 + (sptr - aligned))
+            if b:
+                s = b[sptr - aligned:]
         if not s:
             print("[diag] envp[%d] string read failed @ 0x%x" % (i, sptr))
             continue
