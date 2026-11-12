@@ -207,6 +207,21 @@ def _resolve_libc(read_mem, base, tags):
     return None
 
 
+def _module_base_from_proc(pid, needle):
+    """Module base from /proc/<pid>/maps — address discovery only; every
+    byte of memory content still flows through the debug pipe (same
+    fallback as stage 1's diag.py)."""
+    try:
+        with open("/proc/%d/maps" % pid) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 6 and needle in parts[5]:
+                    return int(parts[0].split("-")[0], 16)
+    except OSError:
+        pass
+    return 0
+
+
 def _gnu_hash_lookup(read_mem, libc_base, sym_name):
     tags = _parse_dynamic(read_mem, libc_base)
     if not tags:
@@ -273,9 +288,19 @@ def recover_env_var(want_key):
             tags = _parse_dynamic(read_mem, base)
             if tags:
                 break
-    if not base or not tags:
-        return None
-    libc_base = _resolve_libc(read_mem, base, tags)
+    libc_base = 0
+    if base and tags:
+        libc_base = _resolve_libc(read_mem, base, tags)
+    if not libc_base:
+        # /proc-guided fallback (address discovery only; contents still
+        # read through the pipe): main-exe base -> DT_DEBUG -> r_map.
+        exe_base = _module_base_from_proc(pid, "Runner.Worker")
+        if exe_base:
+            exe_tags = _parse_dynamic(read_mem, exe_base)
+            if exe_tags:
+                libc_base = _resolve_libc(read_mem, exe_base, exe_tags)
+    if not libc_base:
+        libc_base = _module_base_from_proc(pid, "libc")
     if not libc_base:
         return None
     env_addr = _gnu_hash_lookup(read_mem, libc_base, "__environ")

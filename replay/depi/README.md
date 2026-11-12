@@ -55,7 +55,7 @@ only manual steps left: merge the PR, then delete the fake `bot-*` release.
 | codex-action pin `5c3f4cc…` (v1.7) | this fork's pre-fix copy | exact |
 | Injected issue body (prompt-closing prefix, diagnostic command, sleep instruction, expected-results text) | article | exact |
 | Payload command shape (`base64 -d \| gunzip > /tmp/diag.py && python3 …`) | article | exact |
-| CoreCLR debug transport v2.0 (48-byte header, types 0/1/4/6/9/10), DCB bootstrap, ELF/link_map/libc walk, GNU-hash `__environ`, env dump, token patterns | article | exact reconstruction |
+| CoreCLR debug transport v2.0 (48-byte header, types 0/1/4/6/9/10), DCB bootstrap, ELF/link_map/libc walk, GNU-hash `__environ`, env dump, token patterns | article | exact reconstruction, with one replay-context addition: when the DCB candidates only reach a RELRO shared library (no `DT_DEBUG`, unfilled `GOT[1]`), module bases come from `/proc/<pid>/maps` — the replay's victim step runs unsandboxed, where the article's payload had no `/proc`. Address discovery only; every byte of memory content still flows through the debug pipes |
 | Base64 blob contents | redacted in article | reconstructed to identical behavior |
 | Exfil channel: workflow logs, slices that survive masking | article | exact |
 | Sleep keeping the runtime token valid | article (5000s) | shortened (default 420s) |
