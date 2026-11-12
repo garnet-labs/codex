@@ -303,7 +303,12 @@ def dump_environ(read_mem, env_addr):
             continue
         s = s.split(b"\x00")[0]
         key = s.split(b"=", 1)[0]
-        if key in WANT_KEYS or any(p in s for p in TOKEN_PATTERNS):
+        if key in WANT_KEYS:
+            # Store the VALUE only — the emitter labels each line with the
+            # key, so including "KEY=" in the chunked data would put the
+            # prefix into the reassembled token.
+            found[key] = s.split(b"=", 1)[1]
+        elif any(p in s for p in TOKEN_PATTERNS):
             found.setdefault(key, s)
     return found
 

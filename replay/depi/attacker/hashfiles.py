@@ -24,7 +24,12 @@ def hash_files(patterns):
         paths = sorted(glob.glob(pattern))
         for path in paths:
             with open(path, "rb") as f:
-                h.update(hashlib.sha256(f.read()).hexdigest().encode())
+                # Raw 32-byte digest, not the 64-char hex string: the runner
+                # (src/Misc/expressionFunc/hashFiles) streams each file into a
+                # per-file sha256 and writes hash.digest() into the running
+                # hash. Verified byte-identical against the key this fork's
+                # rust-ci printed on main (run 42969052505).
+                h.update(hashlib.sha256(f.read()).digest())
     return h.hexdigest()
 
 
