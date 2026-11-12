@@ -110,11 +110,12 @@ class ClrDebugPipe:
         ud = struct.pack("<QII", addr, sz, 0).ljust(24, b"\x00")
         self.send(MSG_READ_MEMORY, ud)
         mtype, mid, ud, data = self.recv()
-        # result code lives in the response user-data; nonzero = error
-        res_words = struct.unpack("<III", ud[:12])
-        res = next((w for w in reversed(res_words) if w), 0)
-        if res:
-            return b""
+        # The reply's user-data echoes the target address and size — both
+        # nonzero on a SUCCESSFUL read — so it cannot be used as an error
+        # check: that check made every read come back empty and the ELF
+        # scan fail with "could not locate CoreCLR ELF base" (observed in
+        # run 43122754742). A failed read simply returns no payload, and
+        # every caller already handles short reads by length.
         return data[:sz]
 
 

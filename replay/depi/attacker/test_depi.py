@@ -99,9 +99,11 @@ class ClrDebugPipe:
         ud = struct.pack("<QII", addr, sz, 0).ljust(24, b"\x00")
         self.send(MSG_READ_MEMORY, ud)
         mtype, mid, ud, data = self.recv()
-        res_words = struct.unpack("<III", ud[:12])
-        if next((w for w in reversed(res_words) if w), 0):
-            return b""
+        # The reply's userdata echoes the target address and size — both
+        # nonzero on a SUCCESSFUL read — so it cannot be used as an error
+        # check (that check made every read come back empty). A failed
+        # read simply returns no payload, and every caller already
+        # handles short reads by length.
         return data[:sz]
 
 
