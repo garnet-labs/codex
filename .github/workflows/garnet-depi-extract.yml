@@ -1,0 +1,56 @@
+# Garnet Depi Replay — evidence extraction
+#
+# Pulls the Garnet runtime evidence (agents, events, profiles) for the
+# replay stages through garnetctl, so the detection analysis doc can cite
+# exact artifacts. Follows the clinejection-poc extraction pattern.
+
+name: "Garnet Depi Replay — Evidence extraction"
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent_ids:
+        description: "Comma-separated Garnet agent IDs from the stage runs (leave empty to list recent agents)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install garnetctl
+        run: |
+          curl -sL https://github.com/garnet-org/garnetctl-releases/releases/latest/download/garnetctl_linux_x86_64.tar.gz | tar -xz
+          chmod +x garnetctl && sudo mv garnetctl /usr/local/bin/
+          garnetctl config set-baseurl https://api.garnet.ai
+          garnetctl config set-token "${{ secrets.GARNET_API_TOKEN }}"
+
+      - name: Discover CLI surface
+        run: |
+          garnetctl --help 2>&1
+          garnetctl list --help 2>&1 || true
+          garnetctl get agent --help 2>&1 || true
+
+      - name: List recent agents (when no IDs given)
+        if: ${{ inputs.agent_ids == '' }}
+        run: |
+          garnetctl list agents --format json 2>&1 || garnetctl get agents 2>&1 || true
+
+      - name: Dump events for the replay agents
+        env:
+          AGENT_IDS: ${{ inputs.agent_ids }}
+        run: |
+          IFS=',' read -ra IDS <<< "$AGENT_IDS"
+          for id in "${IDS[@]}"; do
+            [ -z "$id" ] && continue
+            echo "======================================================"
+            echo "=== AGENT $id ==="
+            garnetctl get agent "$id" 2>&1 || true
+            garnetctl list events --agent-id "$id" --format json 2>&1 || \
+              garnetctl list events "$id" --format json 2>&1 || true
+          done
